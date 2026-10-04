@@ -44,6 +44,13 @@ class AccountProfileTests(unittest.TestCase):
 
         self.assertEqual(legacy.profile_id, profiles.PROFILE_MEOWANT)
 
+    def test_meowant_sends_the_phone_app_country_on_its_own_host(self):
+        self.assertTrue(profiles.requires_country(profiles.PROFILE_MEOWANT))
+        self.assertEqual(profiles.area_code_for(profiles.PROFILE_MEOWANT, "us"), "US")
+        self.assertTrue(profiles.uses_fixed_host(profiles.PROFILE_MEOWANT))
+        self.assertFalse(profiles.uses_fixed_host(profiles.PROFILE_UPET))
+        self.assertEqual(profiles.DEFAULT_PROFILE, profiles.PROFILE_MEOWANT)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,7 +75,7 @@ Settings -> Devices & services -> Add integration -> UPET / Airrobo Cat Litter B
 Required fields:
 
 - `Account provider`: select `UPET / Airrobo` or `Meowant` according to the account being used.
-- `Country`: for UPET/Airrobo, the same country selected for the account in the official app.
+- `Country`: the same country selected in the phone app. Meowant keeps its own server and sends that country with the login, so United States is available. UPET / Airrobo still uses its European country list to choose the server.
 - `Account`: login account for the selected provider.
 - `Password`: plain account password. The integration hashes it internally before sending it to the API.
 

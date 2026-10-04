@@ -11,7 +11,7 @@ except ImportError:
 PROFILE_UPET = "upet_airrobo"
 PROFILE_MEOWANT = "meowant"
 LEGACY_PROFILE_MEOWANT = "air_pet_meowant"
-DEFAULT_PROFILE = PROFILE_UPET
+DEFAULT_PROFILE = PROFILE_MEOWANT
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,3 +61,26 @@ def get_profile(profile_id: str) -> AccountProfile:
         return ACCOUNT_PROFILES[profile_id]
     except KeyError as err:
         raise ValueError(f"unknown account profile: {profile_id}") from err
+
+
+def requires_country(profile_id: str) -> bool:
+    """Both apps ask for the country chosen when the account was created."""
+
+    get_profile(profile_id)
+    return True
+
+
+def area_code_for(profile_id: str, country: str) -> str:
+    """Return the ISO country sent as the login area code."""
+
+    get_profile(profile_id)
+    code = country.strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        raise ValueError("country is required")
+    return code
+
+
+def uses_fixed_host(profile_id: str) -> bool:
+    """Meowant stays on its own host. UPET picks a host from the country."""
+
+    return get_profile(profile_id).profile_id != PROFILE_UPET
