@@ -50,6 +50,9 @@
       "box_status": {
         "name": "Box status"
       },
+      "last_visit": {
+        "name": "Last visit"
+      },
       "box_use_times": {
         "name": "Box use times"
       },

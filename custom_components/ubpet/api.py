@@ -361,7 +361,8 @@ class UbpetClient:
                 "box_use_times": _safe_dict_call(self.get_box_use_times, serial),
                 "deodorant": _safe_dict_call(self.get_deodorant_status, serial),
                 "online": _safe_dict_call(self.get_device_online, serial),
-                "cat_records": _safe_list_call(self.get_box_records, serial, 0, 1),
+                # A few, so two visits between polls both reach the Last visit sensor.
+                "cat_records": _safe_list_call(self.get_box_records, serial, 0, 5),
                 "device_records": _safe_list_call(self.get_box_records, serial, 1, 1),
             }
         return {

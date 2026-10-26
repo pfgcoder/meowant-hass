@@ -12,6 +12,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import UbpetDataUpdateCoordinator
@@ -29,6 +30,14 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         icon="mdi:list-status",
         translation_key="box_status",
         value_fn=lambda item: _box_status(item),
+    ),
+    UbpetSensorDescription(
+        key="last_visit",
+        name="Last visit",
+        icon="mdi:cat",
+        translation_key="last_visit",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda item: _milliseconds_to_datetime(_latest_cat_record(item).get("eventTime")),
     ),
     UbpetSensorDescription(
         key="empty_waste_bin_reminder_days",
@@ -252,6 +261,8 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
                 "device_status_code": item.get("device", {}).get("deviceStatus"),
                 "mqtt_work_state": _mqtt_state_value(item, "w_state_app_name"),
             }
+        if self.entity_description.key == "last_visit":
+            return _last_visit_attributes(item)
         if self.entity_description.key.startswith("mqtt_"):
             mqtt_state = item.get("mqtt_state")
             return mqtt_state if isinstance(mqtt_state, dict) else {}
@@ -402,6 +413,46 @@ def _empty_waste_bin_reminder_config(config: dict[str, Any]) -> dict[str, Any] |
         if isinstance(item, dict) and item.get("type") == 4 and item.get("notifyConfigId") is not None:
             return item
     return None
+
+
+def _cat_records(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the box's visit records, newest first."""
+    records = item.get("cat_records")
+    if not isinstance(records, list):
+        return []
+    visits = [
+        record
+        for record in records
+        if isinstance(record, dict) and _milliseconds_to_datetime(record.get("eventTime")) is not None
+    ]
+    return sorted(visits, key=lambda record: _milliseconds_to_datetime(record.get("eventTime")), reverse=True)
+
+
+def _latest_cat_record(item: dict[str, Any]) -> dict[str, Any]:
+    records = _cat_records(item)
+    return records[0] if records else {}
+
+
+def _last_visit_attributes(item: dict[str, Any]) -> dict[str, Any]:
+    records = _cat_records(item)
+    if not records:
+        return {}
+    return {
+        **_visit_summary(records[0]),
+        "record_id": records[0].get("recordId"),
+        "recent_visits": [_visit_summary(record) for record in records],
+    }
+
+
+def _visit_summary(record: dict[str, Any]) -> dict[str, Any]:
+    # eventTime is epoch milliseconds; the record's timeStr is in the server's China time.
+    return {
+        "time": dt_util.as_local(_milliseconds_to_datetime(record.get("eventTime"))).isoformat(),
+        "cat": record.get("catNickname"),
+        "weight_kg": record.get("weight"),
+        "duration_s": record.get("costTime"),
+        "event_type": record.get("eventType"),
+    }
 
 
 def _mqtt_state_value(item: dict[str, Any], key: str) -> Any:
