@@ -177,6 +177,8 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         icon="mdi:cloud-check-outline",
         translation_key="last_rest_update",
         entity_category=EntityCategory.DIAGNOSTIC,
+        # Changes on every poll, which floods the logbook and recorder.
+        entity_registry_enabled_default=False,
         device_class=SensorDeviceClass.TIMESTAMP,
         value_fn=lambda item: _runtime_state_value(item, "last_rest_update_at"),
     ),
@@ -186,6 +188,8 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         icon="mdi:message-check-outline",
         translation_key="last_mqtt_update",
         entity_category=EntityCategory.DIAGNOSTIC,
+        # Changes on every poll, which floods the logbook and recorder.
+        entity_registry_enabled_default=False,
         device_class=SensorDeviceClass.TIMESTAMP,
         value_fn=lambda item: _runtime_state_value(item, "last_mqtt_update_at"),
     ),
@@ -247,6 +251,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity):
     entity_description: UbpetSensorDescription
+    # The MQTT sensors' attributes include each reply's message bookkeeping, which differs on every
+    # poll. Recording it would store a new row per poll even when the box's state hasn't changed,
+    # so it only shows on the live entity.
+    _unrecorded_attributes = frozenset(
+        {
+            "cid",
+            "gid",
+            "created_at_ms",
+            "from_uid",
+            "to_uid",
+            "received_phase",
+            "received_topic",
+            "received_qos",
+            "mqtt_service",
+            "command_cid",
+            "command_gid",
+            "command_created_at_ms",
+            "protocol_version",
+            "content_type",
+            "type_url",
+            "command_protype",
+            "risp_cmd",
+            "risp_seq",
+            "risp_attr",
+            "risp_data_len",
+            "risp_body_hex",
+            "timestamp",
+        }
+    )
 
     def __init__(self, coordinator: UbpetDataUpdateCoordinator, entry_id: str, serial: str, description: UbpetSensorDescription) -> None:
         super().__init__(coordinator)
