@@ -255,6 +255,9 @@ def _latest_mqtt_state(result: dict[str, Any] | object) -> dict[str, Any] | None
     messages = result.get("received_messages")
     if not isinstance(messages, list):
         return None
+    # The request went to the box's IM contact, so only its replies count; anything else arriving
+    # on the topic during the listen window could set a false status.
+    target_uid = result.get("target_uid")
 
     latest: dict[str, Any] | None = None
     for message in messages:
@@ -264,6 +267,8 @@ def _latest_mqtt_state(result: dict[str, Any] | object) -> dict[str, Any] | None
         if not isinstance(decoded, dict):
             continue
         if decoded.get("risp_cmd") != 1021:
+            continue
+        if target_uid is None or str(decoded.get("from_uid")) != str(target_uid):
             continue
         if "w_mode_app_name" not in decoded and "w_state_app_name" not in decoded:
             continue
