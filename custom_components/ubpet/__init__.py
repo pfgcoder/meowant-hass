@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
@@ -33,42 +35,7 @@ MQTT_POLL_START_DELAY_SECONDS = 30
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    profile_id = entry.data.get(CONF_PROFILE)
-    profile = get_profile(profile_id) if profile_id else None
-    country = entry.data.get(CONF_COUNTRY, "")
-    profile_base_url = (
-        base_url_for_country(country)
-        if profile and profile.profile_id == PROFILE_UPET and country
-        else profile.base_url if profile else DEFAULT_BASE_URL
-    )
-    app_key = entry.data.get(CONF_APP_KEY) or (profile.app_key if profile else DEFAULT_APP_KEY)
-    app_id = entry.data.get(CONF_APP_ID) or (profile.app_id if profile else DEFAULT_APP_ID)
-    base_url = entry.data.get(CONF_BASE_URL) or profile_base_url
-    product = entry.data.get(CONF_PRODUCT) or (profile.product if profile else DEFAULT_PRODUCT)
-    missing = [
-        field
-        for field, value in (
-            (CONF_APP_KEY, app_key),
-            (CONF_APP_ID, app_id),
-            (CONF_BASE_URL, base_url),
-            (CONF_PRODUCT, product),
-        )
-        if not value
-    ]
-    if missing:
-        _LOGGER.error("UPET setup has missing API field(s): %s", ", ".join(missing))
-
-    client = UbpetClient(
-        account=entry.data["account"],
-        password=entry.data["password"],
-        app_key=app_key,
-        device_id=entry.data[CONF_DEVICE_ID],
-        app_id=app_id,
-        base_url=base_url,
-        product=product,
-        area_code=entry.data.get(CONF_AREA_CODE, country),
-    )
-    coordinator = UbpetDataUpdateCoordinator(hass, client)
+    coordinator = UbpetDataUpdateCoordinator(hass, client_from_entry_data(entry.data))
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
@@ -103,3 +70,42 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if coordinator is not None:
             coordinator.cancel_mqtt_state_polls()
     return unload_ok
+
+
+def client_from_entry_data(data: Mapping[str, Any]) -> UbpetClient:
+    """Build the API client a config entry describes; the reauth step uses it to check a new password."""
+    profile_id = data.get(CONF_PROFILE)
+    profile = get_profile(profile_id) if profile_id else None
+    country = data.get(CONF_COUNTRY, "")
+    profile_base_url = (
+        base_url_for_country(country)
+        if profile and profile.profile_id == PROFILE_UPET and country
+        else profile.base_url if profile else DEFAULT_BASE_URL
+    )
+    app_key = data.get(CONF_APP_KEY) or (profile.app_key if profile else DEFAULT_APP_KEY)
+    app_id = data.get(CONF_APP_ID) or (profile.app_id if profile else DEFAULT_APP_ID)
+    base_url = data.get(CONF_BASE_URL) or profile_base_url
+    product = data.get(CONF_PRODUCT) or (profile.product if profile else DEFAULT_PRODUCT)
+    missing = [
+        field
+        for field, value in (
+            (CONF_APP_KEY, app_key),
+            (CONF_APP_ID, app_id),
+            (CONF_BASE_URL, base_url),
+            (CONF_PRODUCT, product),
+        )
+        if not value
+    ]
+    if missing:
+        _LOGGER.error("UPET setup has missing API field(s): %s", ", ".join(missing))
+
+    return UbpetClient(
+        account=data["account"],
+        password=data["password"],
+        app_key=app_key,
+        device_id=data[CONF_DEVICE_ID],
+        app_id=app_id,
+        base_url=base_url,
+        product=product,
+        area_code=data.get(CONF_AREA_CODE, country),
+    )

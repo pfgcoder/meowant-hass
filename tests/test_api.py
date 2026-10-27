@@ -760,6 +760,27 @@ class ApiUnitTests(unittest.TestCase):
         with self.assertRaises(api.UbpetApiError):
             api._require_list({"code": 0, "data": {}})
 
+    def test_login_refused_by_the_server_is_an_auth_error(self):
+        client = self.make_client()
+        tried = []
+
+        def refuse(account_type):
+            tried.append(account_type)
+            raise api.UbpetApiError(200, {"code": 2004, "message": "user not found"})
+
+        client._login_with_account_type = refuse
+        with self.assertRaises(api.UbpetAuthError):
+            client.login()
+        self.assertEqual(tried, ["1", "0", "2"])
+
+    def test_login_failing_on_a_server_error_is_not_an_auth_error(self):
+        client = self.make_client()
+        client._login_with_account_type = lambda account_type: (_ for _ in ()).throw(api.UbpetApiError(503, {}))
+
+        with self.assertRaises(api.UbpetApiError) as caught:
+            client.login()
+        self.assertNotIsInstance(caught.exception, api.UbpetAuthError)
+
     def test_box_records_with_null_data_fail_as_an_api_error(self):
         client = self.make_client()
         client._request = lambda method, path, *, payload=None, auth: {"code": 0, "data": None}
@@ -869,7 +890,12 @@ class DiagnosticsUnitTests(unittest.TestCase):
                 "user_id": "1234567",
                 "devices": {
                     "FAT010SERIAL": {
-                        "device": {"serialNumber": "FAT010SERIAL", "deviceName": "Litter Box"},
+                        "device": {
+                            "serialNumber": "FAT010SERIAL",
+                            "deviceName": "Litter Box",
+                            "adminUserNickName": "owner_nick",
+                        },
+                        "online": {"sn": "FAT010SERIAL", "ip": "203.0.113.7", "online": True},
                         "config": {
                             "wifiName": "My_IoT",
                             "gmtTimeZone": "GMT+03:00",
@@ -881,7 +907,16 @@ class DiagnosticsUnitTests(unittest.TestCase):
                     }
                 },
                 "cats": [
-                    {"catInfoId": 5, "nickname": "Whiskers", "weight": 3.3, "icon": "https://private.example/cat.jpg"}
+                    {
+                        "catInfoId": 5,
+                        "nickname": "Whiskers",
+                        "weight": 3.3,
+                        "baseWeight": 3.4,
+                        "birthday": "2022-07-09",
+                        "icon": "https://private.example/cat.jpg",
+                        "userId": 7654321,
+                        "userNickName": "owner_nick",
+                    }
                 ],
             },
         )
@@ -899,9 +934,11 @@ class DiagnosticsUnitTests(unittest.TestCase):
         for private in (
             "FAT010SERIAL", "1234567", "717401", "717422", "My_IoT", "Whiskers", "3.3",
             "private.example", "user@example.com", "hunter2", "phone-id", "app-key-value",
+            "owner_nick", "203.0.113.7", "7654321", "3.4", "2022-07-09",
         ):
             self.assertNotIn(private, text)
         device = result["data"]["devices"]["device_1"]
+        self.assertTrue(device["online"]["online"])
         self.assertNotIn("cat_records", device)
         self.assertNotIn("device_records", device)
         self.assertEqual(device["config"]["gmtTimeZone"], "GMT+03:00")

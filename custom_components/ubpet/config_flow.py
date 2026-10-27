@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 import uuid
 
@@ -10,7 +11,8 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
-from .api import UbpetApiError, UbpetClient
+from . import client_from_entry_data
+from .api import UbpetApiError, UbpetAuthError, UbpetClient
 from .const import (
     CONF_AREA_CODE,
     CONF_APP_ID,
@@ -237,6 +239,42 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             )
         return self.async_create_entry(title=title, data=entry_data)
+
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]):
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None):
+        """Ask for the account's current password after the stored one was refused."""
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                password = _clean_required_string(user_input.get(CONF_PASSWORD))
+                client = client_from_entry_data({**entry.data, "password": password})
+                await self.hass.async_add_executor_job(client.login)
+            except ValueError:
+                errors["base"] = "missing_required"
+            except UbpetAuthError:
+                errors["base"] = "auth_failed"
+            except (OSError, UbpetApiError):
+                errors["base"] = "cannot_connect"
+            except Exception:
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(entry, data_updates={"password": password})
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PASSWORD): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                    ),
+                }
+            ),
+            description_placeholders={"account": entry.data.get("account", "")},
+            errors=errors,
+        )
 
     @staticmethod
     @callback

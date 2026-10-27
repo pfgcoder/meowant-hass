@@ -33,6 +33,13 @@
           "app_id": "App ID",
           "product": "Product"
         }
+      },
+      "reauth_confirm": {
+        "title": "Log in again",
+        "description": "Home Assistant could not log in to Air Pet as {account}. Enter the account's current password.",
+        "data": {
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -42,7 +49,8 @@
       "missing_required": "Choose the country from the phone app, then enter the account and password."
     },
     "abort": {
-      "already_configured": "This account is already configured."
+      "already_configured": "This account is already configured.",
+      "reauth_successful": "Logged in again. The integration has reloaded."
     }
   },
   "entity": {

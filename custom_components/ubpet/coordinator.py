@@ -8,9 +8,10 @@ import time
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import UbpetApiError, UbpetClient
+from .api import UbpetApiError, UbpetAuthError, UbpetClient
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,6 +49,11 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("Starting UPET data update")
         try:
             data = await self.hass.async_add_executor_job(self.client.get_dashboard)
+        except UbpetAuthError as err:
+            # The stored password was refused. Each retry is up to three logins and could lock the
+            # account, so stop polling and let Home Assistant ask for the password (reauth).
+            self.cancel_mqtt_state_polls()
+            raise ConfigEntryAuthFailed(str(err)) from err
         except (OSError, RuntimeError, UbpetApiError) as err:
             _LOGGER.exception("UPET data update failed")
             raise UpdateFailed(str(err)) from err
@@ -177,6 +183,10 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 serial,
                 MQTT_STATE_REQUEST_TIMEOUT_SECONDS,
             )
+        except UbpetAuthError as err:
+            # Stop polling with a refused password; the next data update starts the reauth.
+            _LOGGER.warning("UPET MQTT state poll stopped for %s: login refused: %s", serial, err)
+            self.cancel_mqtt_state_polls()
         except (OSError, RuntimeError, UbpetApiError) as err:
             _LOGGER.warning("UPET MQTT state poll failed for %s: %s", serial, err)
         except Exception:

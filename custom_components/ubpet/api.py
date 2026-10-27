@@ -54,6 +54,10 @@ class UbpetApiError(RuntimeError):
         super().__init__(f"UPET API error status={status} code={code} message={message}")
 
 
+class UbpetAuthError(UbpetApiError):
+    """The server refused the login itself (account or password), rather than being unreachable."""
+
+
 @dataclass(slots=True)
 class UbpetAuth:
     token: str
@@ -143,6 +147,10 @@ class UbpetClient:
                 )
                 last_error = err
         if last_error is not None:
+            if last_error.status < 500:
+                # Every account type was answered and refused, so retrying the same password only
+                # risks a lockout; callers should ask for a new one.
+                raise UbpetAuthError(last_error.status, last_error.payload) from last_error
             raise last_error
         raise RuntimeError("no account type candidates")
 
