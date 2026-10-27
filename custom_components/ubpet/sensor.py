@@ -40,6 +40,14 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         value_fn=lambda item: _milliseconds_to_datetime(_latest_cat_record(item).get("eventTime")),
     ),
     UbpetSensorDescription(
+        key="visits_today",
+        name="Visits today",
+        icon="mdi:counter",
+        translation_key="visits_today",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda item: _visits_today(_cat_records(item)),
+    ),
+    UbpetSensorDescription(
         key="empty_waste_bin_reminder_days",
         name="Empty waste bin reminder days",
         icon="mdi:calendar-week",
@@ -198,6 +206,15 @@ CAT_SENSORS: tuple[UbpetSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda item: item.get("costTime"),
     ),
+    UbpetSensorDescription(
+        key="cat_visits_today",
+        name="Visits today",
+        icon="mdi:counter",
+        translation_key="cat_visits_today",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        # Needs every box's records, so UbpetCatSensor.native_value counts it.
+        value_fn=lambda item: None,
+    ),
 )
 
 
@@ -298,6 +315,9 @@ class UbpetCatSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity
         cat = self._cat_data
         if cat is None:
             return None
+        if self.entity_description.key == "cat_visits_today":
+            records = [record for item in self.coordinator.data.get("devices", {}).values() for record in _cat_records(item)]
+            return _visits_today(records, cat.get("nickname"))
         return self.entity_description.value_fn(cat)
 
     @property
@@ -440,8 +460,24 @@ def _last_visit_attributes(item: dict[str, Any]) -> dict[str, Any]:
     return {
         **_visit_summary(records[0]),
         "record_id": records[0].get("recordId"),
-        "recent_visits": [_visit_summary(record) for record in records],
+        "recent_visits": [_visit_summary(record) for record in records[:5]],
     }
+
+
+def _visits_today(records: list[dict[str, Any]], cat_nickname: str | None = None) -> int | None:
+    """Count named visits since local midnight, for one cat or for all of them."""
+    if not records:
+        # The box always has some history, so no records means the request failed.
+        return None
+    midnight = dt_util.start_of_local_day()
+    return sum(
+        1
+        for record in records
+        # eventType 3 is a visit matched to a cat; 21 is a weight the box couldn't match.
+        if record.get("eventType") == 3
+        and _milliseconds_to_datetime(record.get("eventTime")) >= midnight
+        and (cat_nickname is None or record.get("catNickname") == cat_nickname)
+    )
 
 
 def _visit_summary(record: dict[str, Any]) -> dict[str, Any]:

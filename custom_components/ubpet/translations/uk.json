@@ -53,6 +53,9 @@
       "last_visit": {
         "name": "Останній візит"
       },
+      "visits_today": {
+        "name": "Відвідування сьогодні"
+      },
       "box_use_times": {
         "name": "Кількість використань"
       },
@@ -79,6 +82,9 @@
       },
       "cat_cost_time": {
         "name": "Тривалість використання"
+      },
+      "cat_visits_today": {
+        "name": "Відвідування сьогодні"
       },
       "firmware_version": {
         "name": "Версія прошивки"

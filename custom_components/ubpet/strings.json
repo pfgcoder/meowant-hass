@@ -53,6 +53,9 @@
       "last_visit": {
         "name": "Last visit"
       },
+      "visits_today": {
+        "name": "Visits today"
+      },
       "box_use_times": {
         "name": "Box use times"
       },
@@ -79,6 +82,9 @@
       },
       "cat_cost_time": {
         "name": "Usage duration"
+      },
+      "cat_visits_today": {
+        "name": "Visits today"
       },
       "firmware_version": {
         "name": "Firmware version"
