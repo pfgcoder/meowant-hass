@@ -776,6 +776,26 @@ def load_diagnostics_module():
     sys.modules.setdefault("homeassistant.config_entries", config_entries_module)
     sys.modules.setdefault("homeassistant.core", core_module)
 
+    # Behaves like Home Assistant's: redacts listed keys at any depth, leaving None and "" alone.
+    diagnostics_component = types.ModuleType("homeassistant.components.diagnostics")
+    diagnostics_component.REDACTED = "**REDACTED**"
+
+    def async_redact_data(data, to_redact):
+        if isinstance(data, list):
+            return [async_redact_data(item, to_redact) for item in data]
+        if not isinstance(data, dict):
+            return data
+        return {
+            key: diagnostics_component.REDACTED
+            if key in to_redact and value not in (None, "")
+            else async_redact_data(value, to_redact)
+            for key, value in data.items()
+        }
+
+    diagnostics_component.async_redact_data = async_redact_data
+    sys.modules.setdefault("homeassistant.components", types.ModuleType("homeassistant.components"))
+    sys.modules["homeassistant.components.diagnostics"] = diagnostics_component
+
     const_module = types.ModuleType("ubpet_diagnostics_test.const")
     const_module.DOMAIN = "ubpet"
     sys.modules["ubpet_diagnostics_test.const"] = const_module
@@ -790,27 +810,53 @@ def load_diagnostics_module():
 
 
 class DiagnosticsUnitTests(unittest.TestCase):
-    def test_redact_removes_credentials_but_keeps_wifi_and_config_values(self):
+    def test_diagnostics_hide_identifying_data_but_keep_config_values(self):
+        import asyncio
+        import types
+
         diagnostics = load_diagnostics_module()
-
-        payload = {
-            "account": "user@example.com",
-            "password": "secret",
-            "device_id": "device-id",
-            "config": {
-                "wifiName": "My_IoT",
-                "gmtTimeZone": "GMT+03:00",
-                "boxFunctionVOList": [{"firmwareVersion": "main_v1"}],
+        coordinator = types.SimpleNamespace(
+            last_update_success=True,
+            data={
+                "user_id": "1234567",
+                "devices": {
+                    "FAT010SERIAL": {
+                        "device": {"serialNumber": "FAT010SERIAL", "deviceName": "Litter Box"},
+                        "config": {
+                            "wifiName": "My_IoT",
+                            "gmtTimeZone": "GMT+03:00",
+                            "boxFunctionVOList": [{"firmwareVersion": "main_v1"}],
+                        },
+                        "mqtt_state": {"from_uid": "717401", "to_uid": "717422", "w_mode": 0},
+                        "cat_records": [{"catNickname": "Whiskers", "eventTime": 1}],
+                        "device_records": [{"eventType": 31, "eventTime": 2}],
+                    }
+                },
+                "cats": [
+                    {"catInfoId": 5, "nickname": "Whiskers", "weight": 3.3, "icon": "https://private.example/cat.jpg"}
+                ],
             },
-            "cats": [{"nickname": "Cat", "icon": "https://private.example/cat.jpg"}],
-        }
+        )
+        hass = types.SimpleNamespace(data={"ubpet": {"entry": coordinator}})
+        entry = types.SimpleNamespace(
+            entry_id="entry",
+            title="Litter Box",
+            data={"account": "user@example.com", "password": "hunter2", "device_id": "phone-id", "app_key": "app-key-value"},
+            options={},
+        )
 
-        redacted = diagnostics._redact(payload)
+        result = asyncio.run(diagnostics.async_get_config_entry_diagnostics(hass, entry))
 
-        self.assertEqual(redacted["account"], diagnostics.REDACTED)
-        self.assertEqual(redacted["password"], diagnostics.REDACTED)
-        self.assertEqual(redacted["device_id"], diagnostics.REDACTED)
-        self.assertEqual(redacted["config"]["wifiName"], "My_IoT")
-        self.assertEqual(redacted["config"]["gmtTimeZone"], "GMT+03:00")
-        self.assertEqual(redacted["cats"][0]["nickname"], "Cat")
-        self.assertEqual(redacted["cats"][0]["icon"], diagnostics.REDACTED)
+        text = json.dumps(result)
+        for private in (
+            "FAT010SERIAL", "1234567", "717401", "717422", "My_IoT", "Whiskers", "3.3",
+            "private.example", "user@example.com", "hunter2", "phone-id", "app-key-value",
+        ):
+            self.assertNotIn(private, text)
+        device = result["data"]["devices"]["device_1"]
+        self.assertNotIn("cat_records", device)
+        self.assertNotIn("device_records", device)
+        self.assertEqual(device["config"]["gmtTimeZone"], "GMT+03:00")
+        self.assertEqual(device["config"]["boxFunctionVOList"], [{"firmwareVersion": "main_v1"}])
+        self.assertEqual(device["mqtt_state"]["w_mode"], 0)
+        self.assertEqual(result["data"]["cats"][0]["catInfoId"], 5)

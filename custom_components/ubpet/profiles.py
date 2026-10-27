@@ -8,6 +8,12 @@ except ImportError:
     _secrets = None
 
 
+# Where each app logs in. Plain constants rather than in the secrets bundle, so a change to where
+# the account and password hash are sent shows in a diff. This module stays free of Home Assistant
+# imports, so it can't use const.py (EU_BASE_URL there is the same host as UPET_BASE_URL).
+UPET_BASE_URL = "https://apis-eu.airrobo-home.com"
+MEOWANT_BASE_URL = "https://apis.airrobo-home.com"
+
 PROFILE_UPET = "upet_airrobo"
 PROFILE_MEOWANT = "meowant"
 LEGACY_PROFILE_MEOWANT = "air_pet_meowant"
@@ -36,7 +42,7 @@ ACCOUNT_PROFILES = {
     PROFILE_UPET: AccountProfile(
         profile_id=PROFILE_UPET,
         label="UPET / Airrobo",
-        base_url=_secret("BASE_URL"),
+        base_url=UPET_BASE_URL,
         app_id=_secret("APP_ID"),
         app_key=_secret("APP_KEY"),
         product=_secret("PRODUCT"),
@@ -44,7 +50,7 @@ ACCOUNT_PROFILES = {
     PROFILE_MEOWANT: AccountProfile(
         profile_id=PROFILE_MEOWANT,
         label="Meowant",
-        base_url=_secret("MEOWANT_BASE_URL"),
+        base_url=MEOWANT_BASE_URL,
         app_id=_secret("MEOWANT_APP_ID"),
         app_key=_secret("MEOWANT_APP_KEY"),
         product=_secret("MEOWANT_PRODUCT"),

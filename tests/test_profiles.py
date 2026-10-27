@@ -31,6 +31,7 @@ class AccountProfileTests(unittest.TestCase):
         self.assertEqual(upet.app_id, "970010026")
         self.assertEqual(meowant.app_id, "970010016")
         self.assertEqual(meowant.base_url, "https://apis.airrobo-home.com")
+        self.assertEqual(upet.base_url, "https://apis-eu.airrobo-home.com")
         self.assertEqual(meowant.product, "97001")
         self.assertEqual(len(meowant.app_key), 32)
         self.assertNotEqual(meowant.app_key, upet.app_key)

@@ -11,13 +11,11 @@ try:
     from .secrets import (
         APP_ID as DEFAULT_APP_ID,
         APP_KEY as DEFAULT_APP_KEY,
-        BASE_URL as DEFAULT_BASE_URL,
         PRODUCT as DEFAULT_PRODUCT,
     )
 except ImportError:
     DEFAULT_APP_ID = ""
     DEFAULT_APP_KEY = ""
-    DEFAULT_BASE_URL = ""
     DEFAULT_PRODUCT = ""
 
 CONF_APP_KEY = "app_key"
@@ -31,6 +29,8 @@ CONF_PROFILE = "profile"
 
 EU_BASE_URL = "https://apis-eu.airrobo-home.com"
 RUSSIA_BASE_URL = "https://apis-ru.airrobo-home.com"
+# Plain here rather than in the secrets bundle, so a change to where logins go shows in a diff.
+DEFAULT_BASE_URL = EU_BASE_URL
 
 # Countries returned by the UPET 2.1.14 region map for the European app.
 SUPPORTED_COUNTRIES = (
