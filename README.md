@@ -51,9 +51,9 @@ Install through HACS as a custom repository:
 1. Open HACS in Home Assistant.
 2. Go to `Integrations`.
 3. Open the three-dot menu and choose `Custom repositories`.
-4. Add `https://github.com/CrazzyBerg/upet-hass`.
+4. Add `https://github.com/pfgcoder/meowant-hass`.
 5. Select category `Integration`.
-6. Install `UPET / Airrobo Cat Litter Box`.
+6. Install `Meowant`.
 
 Restart Home Assistant after installation.
 
@@ -67,7 +67,7 @@ Manual installation is also possible by copying this repository's
 Add the integration from Home Assistant:
 
 ```text
-Settings -> Devices & services -> Add integration -> UPET / Airrobo Cat Litter Box
+Settings -> Devices & services -> Add integration -> Meowant
 ```
 
 ## Configuration

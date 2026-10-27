@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "UPET / Airrobo / Meowant Cat Litter Box",
+        "title": "Meowant",
         "description": "Choose Meowant for the AIR PET app. The next step asks for the same country you selected on the phone.",
         "data": {
           "profile": "Account provider"

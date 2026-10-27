@@ -89,7 +89,7 @@ class UbpetDeviceBinarySensor(CoordinatorEntity[UbpetDataUpdateCoordinator], Bin
         device = item.get("device", {})
         return DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
-            manufacturer="Airrobo / UBT",
+            manufacturer="Meowant",
             name=device.get("deviceName") or self._serial,
             serial_number=self._serial,
         )

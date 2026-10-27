@@ -260,7 +260,7 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
         device = item.get("device", {})
         return DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
-            manufacturer="Airrobo / UBT",
+            manufacturer="Meowant",
             name=device.get("deviceName") or self._serial,
             serial_number=self._serial,
         )
@@ -320,7 +320,7 @@ class UbpetCatSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity
         cat = self._cat_data or {}
         return DeviceInfo(
             identifiers={(DOMAIN, f"cat_{self._cat_id}")},
-            manufacturer="Airrobo / UBT",
+            manufacturer="Meowant",
             name=cat.get("nickname") or f"Cat {self._cat_id}",
         )
 

@@ -102,7 +102,7 @@ class UbpetPeriodTime(CoordinatorEntity[UbpetDataUpdateCoordinator], TimeEntity)
         device = item.get("device", {})
         return DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
-            manufacturer="Airrobo / UBT",
+            manufacturer="Meowant",
             name=device.get("deviceName") or self._serial,
             serial_number=self._serial,
         )
@@ -184,7 +184,7 @@ class UbpetEmptyWasteBinReminderTime(CoordinatorEntity[UbpetDataUpdateCoordinato
         device = item.get("device", {})
         return DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
-            manufacturer="Airrobo / UBT",
+            manufacturer="Meowant",
             name=device.get("deviceName") or self._serial,
             serial_number=self._serial,
         )

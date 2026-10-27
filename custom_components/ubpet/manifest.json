@@ -1,12 +1,12 @@
 {
   "domain": "ubpet",
-  "name": "UPET / Airrobo / Meowant Cat Litter Box",
+  "name": "Meowant",
   "codeowners": ["@CrazzyBerg"],
   "config_flow": true,
   "documentation": "https://github.com/CrazzyBerg/upet-hass",
   "issue_tracker": "https://github.com/CrazzyBerg/upet-hass/issues",
   "iot_class": "cloud_polling",
   "requirements": [],
-  "version": "1.1.2+pfg.3",
+  "version": "1.1.2+pfg.4",
   "diagnostics": true
 }
