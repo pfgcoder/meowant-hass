@@ -130,7 +130,7 @@ def _period_value(config: dict[str, Any]) -> int:
 
 
 def _empty_waste_bin_reminder_config(config: dict[str, Any]) -> dict[str, Any] | None:
-    for item in config.get("notifyConfigList", []):
+    for item in config.get("notifyConfigList") or []:
         if isinstance(item, dict) and item.get("type") == 4 and item.get("notifyConfigId") is not None:
             return item
     return None

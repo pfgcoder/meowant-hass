@@ -97,6 +97,10 @@ class UbpetClient:
         self.signer = UbtV2Signer(app_key)
         self.auth: UbpetAuth | None = None
         self._auth_lock = threading.Lock()
+        # The IM login (MQTT credentials and our sender uid) and each box's IM contact, reused
+        # between MQTT sends instead of fetched over REST every time; dropped when a send fails.
+        self._im_session: tuple[dict[str, Any], str] | None = None
+        self._im_contacts: dict[str, dict[str, Any]] = {}
 
     def ensure_login(self) -> UbpetAuth:
         if auth := self._usable_auth():
@@ -225,20 +229,25 @@ class UbpetClient:
         return _require_list(data)
 
     def send_mqtt_service(self, serial_number: str, service_id: str) -> dict[str, Any]:
-        credentials = self.get_im_credentials()
-        contact = _find_im_contact(self.get_im_friends(), serial_number)
+        credentials, from_uid, contact = self._im_session_for(serial_number)
         publish_credentials, publish_sources = _mqtt_publish_credentials(credentials)
         target_uid = str(contact["userId"])
-        from_uid = _find_account_uid(credentials, self.auth)
-        parts = publish_service(
-            base_url=self.base_url,
-            credentials=publish_credentials,
-            target_uid=target_uid,
-            from_uid=from_uid,
-            service_id=service_id,
-            seq=None,
-            listen_seconds=_mqtt_listen_seconds(service_id),
-        )
+        try:
+            parts = publish_service(
+                base_url=self.base_url,
+                credentials=publish_credentials,
+                target_uid=target_uid,
+                from_uid=from_uid,
+                service_id=service_id,
+                seq=None,
+                listen_seconds=_mqtt_listen_seconds(service_id),
+                # A state request is answered once, so stop listening as soon as the box replies.
+                stop_on_state_reply=service_id == "request_state",
+            )
+        except (OSError, RuntimeError):
+            # The reused IM login may have expired; the next send fetches a fresh one.
+            self._im_session = None
+            raise
         result = parts.as_dict()
         result["from_uid"] = from_uid
         result["target_uid"] = target_uid
@@ -256,6 +265,16 @@ class UbpetClient:
         result.update(_summarize_mqtt_result(result, target_uid=target_uid))
         return result
 
+    def _im_session_for(self, serial_number: str) -> tuple[dict[str, Any], str, dict[str, Any]]:
+        if self._im_session is None:
+            credentials = self.get_im_credentials()
+            self._im_session = (credentials, _find_account_uid(credentials, self.auth))
+            self._im_contacts = {}
+        if serial_number not in self._im_contacts:
+            self._im_contacts[serial_number] = _find_im_contact(self.get_im_friends(), serial_number)
+        credentials, from_uid = self._im_session
+        return credentials, from_uid, self._im_contacts[serial_number]
+
     def get_cats(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/catbox-server/web/cat/info", auth=True)
         return _require_list(data)
@@ -268,18 +287,20 @@ class UbpetClient:
             "messageType": message_type,
         }
         data = self._request("POST", "/catbox-server/web/box/record/new", payload=payload, auth=True)
-        records = data.get("data", {}).get("records") if isinstance(data, dict) else None
+        # The server can send "data": null, which must read as a failed call, not crash the refresh.
+        records = (data.get("data") or {}).get("records") if isinstance(data, dict) else None
         if not isinstance(records, list):
             raise UbpetApiError(200, data)
         return [record for record in records if isinstance(record, dict)]
 
-    def set_auto_clean_delay(self, serial_number: str, minutes: int) -> None:
+    def set_auto_clean_delay(self, serial_number: str, minutes: int, enabled: bool = True) -> None:
         if minutes < 1:
             raise ValueError("auto clean delay must be at least 1 minute")
+        # The delay and the auto clean switch are one setting, so send the switch as it is.
         payload = {
             "serialNumber": serial_number,
             "functionType": 2,
-            "controlSwitch": 1,
+            "controlSwitch": 1 if enabled else 0,
             "optionInt": minutes * 60,
         }
         self._request("PUT", "/catbox-server/box/config/switch/update", payload=payload, auth=True)

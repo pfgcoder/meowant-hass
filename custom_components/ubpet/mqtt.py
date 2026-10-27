@@ -5,7 +5,7 @@ import random
 import socket
 import ssl
 import time
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 MESSAGE_PROTOCOL_VERSION = "1.0.1"
@@ -474,6 +474,7 @@ def publish_service_on_connection(
     seq: int | None,
     timeout: float,
     listen_seconds: float = 5,
+    stop_on_state_reply: bool = False,
 ) -> PayloadParts:
     client_id = _first_text(credentials, "clientId", "client_id")
     username = _first_text(credentials, "mqttUserName", "userName", "username")
@@ -507,6 +508,7 @@ def publish_service_on_connection(
         timeout=timeout,
         listen_seconds=float(listen_seconds),
         phase="command",
+        stop_when=(lambda decoded: _is_state_reply_from(decoded, target_uid)) if stop_on_state_reply else None,
     )
     conn.sendall(mqtt_packet(0xE0, b""))
     return PayloadParts(
@@ -535,6 +537,7 @@ def publish_service(
     port: int = DEFAULT_MQTT_PORT,
     timeout: float = 10,
     listen_seconds: float = 5,
+    stop_on_state_reply: bool = False,
 ) -> PayloadParts:
     host, endpoint_port, _source = mqtt_endpoint(base_url, credentials, port)
     raw_sock = socket.create_connection((host, endpoint_port), timeout=timeout)
@@ -550,9 +553,14 @@ def publish_service(
                 seq=seq,
                 timeout=timeout,
                 listen_seconds=listen_seconds,
+                stop_on_state_reply=stop_on_state_reply,
             )
     finally:
         raw_sock.close()
+
+
+def _is_state_reply_from(decoded: Any, uid: str) -> bool:
+    return isinstance(decoded, dict) and decoded.get("risp_cmd") == 1021 and str(decoded.get("from_uid")) == str(uid)
 
 
 def _first_text(payload: dict[str, Any], *keys: str) -> str:
@@ -570,7 +578,14 @@ def _first_optional_text(payload: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def collect_mqtt_messages(conn: Any, *, timeout: float, listen_seconds: float, phase: str = "listen") -> list[dict[str, Any]]:
+def collect_mqtt_messages(
+    conn: Any,
+    *,
+    timeout: float,
+    listen_seconds: float,
+    phase: str = "listen",
+    stop_when: Callable[[Any], bool] | None = None,
+) -> list[dict[str, Any]]:
     if listen_seconds <= 0:
         return []
     deadline = time.monotonic() + listen_seconds
@@ -607,6 +622,8 @@ def collect_mqtt_messages(conn: Any, *, timeout: float, listen_seconds: float, p
             )
             if qos and packet_id is not None:
                 conn.sendall(mqtt_packet(0x40, packet_id.to_bytes(2, "big")))
+            if stop_when is not None and stop_when(messages[-1]["decoded"]):
+                break
         elif packet_type == 13:
             continue
         else:
@@ -726,10 +743,11 @@ def summarize_all_state_body(body: bytes) -> dict[str, Any]:
         summary["w_mode_app_name"] = WORK_MODE_APP_NAMES.get(w_mode, f"UNKNOWN_{w_mode}")
     if isinstance(w_state, int):
         summary["w_state_name"] = WORK_STATE_NAMES.get(w_state, f"unknown_{w_state}")
-        # Some SC-01 firmware reports IDLE + RUNNING when it is ready. Treat
-        # idle mode as PENDING so start controls remain available.
+        # Some SC-01 firmware reports IDLE + RUNNING when it is ready. Treat that
+        # as PENDING so start controls remain available. Other idle states (a cat
+        # in the box shows as BLOCKED) keep their own name.
         summary["w_state_app_name"] = (
-            "PENDING" if w_mode == 0 else WORK_STATE_APP_NAMES.get(w_state, f"UNKNOWN_{w_state}")
+            "PENDING" if w_mode == 0 and w_state == 1 else WORK_STATE_APP_NAMES.get(w_state, f"UNKNOWN_{w_state}")
         )
     return summary
 

@@ -211,7 +211,9 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         country: str,
     ):
         app_id = _clean_required_string(connection_data[CONF_APP_ID])
-        await self.async_set_unique_id(f"{app_id}:{user_input[CONF_USERNAME]}")
+        # The same account typed with other spacing or capitals is still the same account.
+        account_key = _clean_required_string(user_input[CONF_USERNAME]).lower()
+        await self.async_set_unique_id(f"{app_id}:{account_key}")
         self._abort_if_unique_id_configured()
         title = profile.label
         if devices:

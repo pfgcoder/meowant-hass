@@ -132,6 +132,29 @@ class MqttCodecUnitTests(unittest.TestCase):
         self.assertEqual(decoded["w_state_name"], "running")
         self.assertEqual(decoded["w_state_app_name"], "PENDING")
 
+    def test_idle_mode_keeps_blocked_state(self):
+        # w_mode 0 (omitted), w_state 2: idle with a cat in the box.
+        decoded = mqtt.summarize_all_state_body(bytes.fromhex("1002"))
+
+        self.assertEqual(decoded["w_mode"], 0)
+        self.assertEqual(decoded["w_state_app_name"], "BLOCKED")
+
+    def test_collect_stops_at_the_awaited_reply(self):
+        conn = FakeConnection()
+        for packet_id in (9, 10):
+            conn.buffer += mqtt.mqtt_packet(0x32, mqtt.mqtt_utf8("sub/topic") + packet_id.to_bytes(2, "big") + b"reply")
+
+        stopped = mqtt.collect_mqtt_messages(conn, timeout=1, listen_seconds=5, stop_when=lambda decoded: True)
+        rest = mqtt.collect_mqtt_messages(conn, timeout=1, listen_seconds=5)
+
+        self.assertEqual([message["packet_id"] for message in stopped], [9])
+        self.assertEqual([message["packet_id"] for message in rest], [10])
+
+    def test_state_reply_must_come_from_the_target(self):
+        self.assertTrue(mqtt._is_state_reply_from({"risp_cmd": 1021, "from_uid": "717401"}, "717401"))
+        self.assertFalse(mqtt._is_state_reply_from({"risp_cmd": 1021, "from_uid": "999999"}, "717401"))
+        self.assertFalse(mqtt._is_state_reply_from({"receipt_status": "receipt/success", "from_uid": "717401"}, "717401"))
+
     def test_service_ids_map_to_app_operation_ordinals(self):
         services = mqtt.SERVICE_ID_MAP
 

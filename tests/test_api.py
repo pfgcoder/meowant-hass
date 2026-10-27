@@ -744,6 +744,7 @@ class ApiUnitTests(unittest.TestCase):
         client.get_box_use_times = lambda serial: {"boxUseTimes": 10}
         client.get_deodorant_status = lambda serial: (_ for _ in ()).throw(api.UbpetApiError(500, {"code": 1}))
         client.get_device_online = lambda serial: {"online": True}
+        client.get_box_records = lambda serial, message_type, size=1: []
         client.get_cats = lambda: [{"catInfoId": 5, "nickname": "Cat"}]
 
         data = client.get_dashboard()
@@ -759,9 +760,56 @@ class ApiUnitTests(unittest.TestCase):
         with self.assertRaises(api.UbpetApiError):
             api._require_list({"code": 0, "data": {}})
 
+    def test_box_records_with_null_data_fail_as_an_api_error(self):
+        client = self.make_client()
+        client._request = lambda method, path, *, payload=None, auth: {"code": 0, "data": None}
 
-if __name__ == "__main__":
-    unittest.main()
+        with self.assertRaises(api.UbpetApiError):
+            client.get_box_records("SN123", 0, 50)
+
+    def test_auto_clean_delay_keeps_the_switch_as_it_is(self):
+        client = self.make_client()
+        sent = []
+        client._request = lambda method, path, *, payload=None, auth: sent.append(payload)
+
+        client.set_auto_clean_delay("SN123", 20, False)
+        client.set_auto_clean_delay("SN123", 15)
+
+        self.assertEqual([payload["controlSwitch"] for payload in sent], [0, 1])
+        self.assertEqual([payload["optionInt"] for payload in sent], [1200, 900])
+
+    def test_send_mqtt_service_reuses_im_login_and_contact_until_a_send_fails(self):
+        client = self.make_client()
+        calls = {"credentials": 0, "friends": 0}
+
+        def get_im_credentials():
+            calls["credentials"] += 1
+            return {"pubTopic": "pub/topic", "uid": "account-uid"}
+
+        def get_im_friends():
+            calls["friends"] += 1
+            return [{"userName": "SN123", "userId": "device-uid"}]
+
+        client.get_im_credentials = get_im_credentials
+        client.get_im_friends = get_im_friends
+
+        class FakeParts:
+            def as_dict(self):
+                return {"seq": 7}
+
+        with patch.object(api, "publish_service", return_value=FakeParts()) as publish:
+            client.send_mqtt_service("SN123", "request_state")
+            client.send_mqtt_service("SN123", "request_state")
+        self.assertEqual(calls, {"credentials": 1, "friends": 1})
+        self.assertTrue(publish.call_args.kwargs["stop_on_state_reply"])
+
+        with patch.object(api, "publish_service", side_effect=RuntimeError("MQTT CONNECT failed")):
+            with self.assertRaises(RuntimeError):
+                client.send_mqtt_service("SN123", "request_state")
+        with patch.object(api, "publish_service", return_value=FakeParts()) as publish:
+            client.send_mqtt_service("SN123", "start_clean_up")
+        self.assertEqual(calls, {"credentials": 2, "friends": 2})
+        self.assertFalse(publish.call_args.kwargs["stop_on_state_reply"])
 
 
 def load_diagnostics_module():
@@ -860,3 +908,7 @@ class DiagnosticsUnitTests(unittest.TestCase):
         self.assertEqual(device["config"]["boxFunctionVOList"], [{"firmwareVersion": "main_v1"}])
         self.assertEqual(device["mqtt_state"]["w_mode"], 0)
         self.assertEqual(result["data"]["cats"][0]["catInfoId"], 5)
+
+
+if __name__ == "__main__":
+    unittest.main()

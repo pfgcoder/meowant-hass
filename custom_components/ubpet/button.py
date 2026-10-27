@@ -182,15 +182,22 @@ class UbpetMqttCommandButton(CoordinatorEntity[UbpetDataUpdateCoordinator], Butt
             _LOGGER.info("Reset UPET waste-bin counter for serial=%s", self._serial)
             await self.coordinator.async_request_refresh()
             return
+        optimistic_state = None
         if self.entity_description.service_id not in DIAGNOSTIC_SERVICES:
             optimistic_state = _optimistic_mqtt_state_for_service(self.entity_description.service_id)
+        if optimistic_state:
+            previous_state = self.coordinator.set_mqtt_work_state(self._serial, optimistic_state)
+        try:
+            result = await self.hass.async_add_executor_job(
+                self.coordinator.client.send_mqtt_service,
+                self._serial,
+                self.entity_description.service_id,
+            )
+        except Exception:
+            # The command didn't go out, so stop showing the state it would have caused.
             if optimistic_state:
-                self.coordinator.set_mqtt_work_state(self._serial, optimistic_state)
-        result = await self.hass.async_add_executor_job(
-            self.coordinator.client.send_mqtt_service,
-            self._serial,
-            self.entity_description.service_id,
-        )
+                self.coordinator.restore_mqtt_work_state(self._serial, previous_state)
+            raise
         _LOGGER.info(
             "Sent UPET MQTT service=%s serial=%s seq=%s cid=%s received=%s",
             self.entity_description.service_id,

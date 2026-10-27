@@ -24,6 +24,7 @@ TO_REDACT = {
     "device_id",
     "deviceId",
     "from_uid",
+    "received_topic",
     "serialNumber",
     "to_uid",
     "user_id",
@@ -48,13 +49,14 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
         for number, item in enumerate(data.get("devices", {}).values(), start=1)
     }
     return {
+        # The title is the box's name, or its serial number when the box has no name.
         "entry": async_redact_data(
             {
                 "title": entry.title,
                 "data": dict(entry.data),
                 "options": dict(entry.options),
             },
-            TO_REDACT,
+            TO_REDACT | {"title"},
         ),
         "last_update_success": coordinator.last_update_success,
         "data": async_redact_data({**data, "devices": devices}, TO_REDACT),

@@ -28,6 +28,40 @@ class UbpetSensorDescription(SensorEntityDescription):
 VISIT_EVENT = 3
 AUTO_CLEANED_EVENT = 31
 
+# Daily counts. They're totals that restart at local midnight (last_reset), so a dip during the
+# day, such as a record falling out of the fetched window, isn't read as a new meter cycle.
+TODAY_COUNT_KEYS = {"visits_today", "cleans_today", "cat_visits_today"}
+
+# Each MQTT reply's message bookkeeping (and the live scale reading), which differs on every poll.
+# Kept off the MQTT sensors' attributes so an unchanged poll doesn't write a new state row.
+MQTT_PER_REPLY_KEYS = frozenset(
+    {
+        "cid",
+        "gid",
+        "created_at_ms",
+        "from_uid",
+        "to_uid",
+        "received_phase",
+        "received_topic",
+        "received_qos",
+        "mqtt_service",
+        "command_cid",
+        "command_gid",
+        "command_created_at_ms",
+        "protocol_version",
+        "content_type",
+        "type_url",
+        "command_protype",
+        "risp_cmd",
+        "risp_seq",
+        "risp_attr",
+        "risp_data_len",
+        "risp_body_hex",
+        "timestamp",
+        "weigh_sensor",
+    }
+)
+
 
 DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
     UbpetSensorDescription(
@@ -50,7 +84,7 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         name="Visits today",
         icon="mdi:counter",
         translation_key="visits_today",
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         value_fn=lambda item: _count_today(_cat_records(item), VISIT_EVENT),
     ),
     UbpetSensorDescription(
@@ -58,7 +92,7 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         name="Cleans today",
         icon="mdi:broom",
         translation_key="cleans_today",
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         value_fn=lambda item: _count_today(_device_records(item), AUTO_CLEANED_EVENT),
     ),
     UbpetSensorDescription(
@@ -229,7 +263,7 @@ CAT_SENSORS: tuple[UbpetSensorDescription, ...] = (
         name="Visits today",
         icon="mdi:counter",
         translation_key="cat_visits_today",
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         # Needs every box's records, so UbpetCatSensor.native_value counts it.
         value_fn=lambda item: None,
     ),
@@ -251,35 +285,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity):
     entity_description: UbpetSensorDescription
-    # The MQTT sensors' attributes include each reply's message bookkeeping, which differs on every
-    # poll. Recording it would store a new row per poll even when the box's state hasn't changed,
-    # so it only shows on the live entity.
-    _unrecorded_attributes = frozenset(
-        {
-            "cid",
-            "gid",
-            "created_at_ms",
-            "from_uid",
-            "to_uid",
-            "received_phase",
-            "received_topic",
-            "received_qos",
-            "mqtt_service",
-            "command_cid",
-            "command_gid",
-            "command_created_at_ms",
-            "protocol_version",
-            "content_type",
-            "type_url",
-            "command_protype",
-            "risp_cmd",
-            "risp_seq",
-            "risp_attr",
-            "risp_data_len",
-            "risp_body_hex",
-            "timestamp",
-        }
-    )
 
     def __init__(self, coordinator: UbpetDataUpdateCoordinator, entry_id: str, serial: str, description: UbpetSensorDescription) -> None:
         super().__init__(coordinator)
@@ -310,6 +315,12 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
         return self.entity_description.value_fn(item)
 
     @property
+    def last_reset(self) -> datetime | None:
+        if self.entity_description.key in TODAY_COUNT_KEYS:
+            return dt_util.start_of_local_day()
+        return None
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         item = self.coordinator.data.get("devices", {}).get(self._serial)
         if not item:
@@ -329,7 +340,9 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
             return _last_visit_attributes(item)
         if self.entity_description.key.startswith("mqtt_"):
             mqtt_state = item.get("mqtt_state")
-            return mqtt_state if isinstance(mqtt_state, dict) else {}
+            if not isinstance(mqtt_state, dict):
+                return {}
+            return {key: value for key, value in mqtt_state.items() if key not in MQTT_PER_REPLY_KEYS}
         if self.entity_description.key in {
             "last_rest_update",
             "last_mqtt_update",
@@ -363,9 +376,18 @@ class UbpetCatSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity
         if cat is None:
             return None
         if self.entity_description.key == "cat_visits_today":
-            records = [record for item in self.coordinator.data.get("devices", {}).values() for record in _cat_records(item)]
-            return _count_today(records, VISIT_EVENT, cat.get("nickname"))
+            per_box = [_cat_records(item) for item in self.coordinator.data.get("devices", {}).values()]
+            if not all(per_box):
+                # A box whose records didn't load would make the count drop, so report unknown.
+                return None
+            return _count_today([record for records in per_box for record in records], VISIT_EVENT, cat)
         return self.entity_description.value_fn(cat)
+
+    @property
+    def last_reset(self) -> datetime | None:
+        if self.entity_description.key in TODAY_COUNT_KEYS:
+            return dt_util.start_of_local_day()
+        return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
@@ -390,7 +412,7 @@ def _firmware_version(config: dict[str, Any]) -> str | None:
     versions = sorted(
         {
             part.get("firmwareVersion")
-            for part in config.get("boxFunctionVOList", [])
+            for part in config.get("boxFunctionVOList") or []
             if part.get("firmwareVersion")
         }
     )
@@ -446,6 +468,9 @@ def _box_status_from_mqtt(item: dict[str, Any]) -> str | None:
         return "Running"
     if state == "PAUSED":
         return "Paused"
+    if state == "BLOCKED":
+        # A cat in the box (or something on the scale) is holding the box.
+        return "Blocked"
     return None
 
 
@@ -476,7 +501,7 @@ def _empty_waste_bin_reminder_days(config: dict[str, Any]) -> str | None:
 
 
 def _empty_waste_bin_reminder_config(config: dict[str, Any]) -> dict[str, Any] | None:
-    for item in config.get("notifyConfigList", []):
+    for item in config.get("notifyConfigList") or []:
         if isinstance(item, dict) and item.get("type") == 4 and item.get("notifyConfigId") is not None:
             return item
     return None
@@ -519,7 +544,7 @@ def _last_visit_attributes(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _count_today(records: list[dict[str, Any]], event_type: int, cat_nickname: str | None = None) -> int | None:
+def _count_today(records: list[dict[str, Any]], event_type: int, cat: dict[str, Any] | None = None) -> int | None:
     """Count records of one eventType since local midnight, optionally for one cat."""
     if not records:
         # The box always has some history, so no records means the request failed.
@@ -530,8 +555,17 @@ def _count_today(records: list[dict[str, Any]], event_type: int, cat_nickname: s
         for record in records
         if record.get("eventType") == event_type
         and _milliseconds_to_datetime(record.get("eventTime")) >= midnight
-        and (cat_nickname is None or record.get("catNickname") == cat_nickname)
+        and (cat is None or _is_cats_record(record, cat))
     )
+
+
+def _is_cats_record(record: dict[str, Any], cat: dict[str, Any]) -> bool:
+    # Match on the cat's ID where the record carries it (the same vendor cloud's records do),
+    # else on the nickname. A cat without one matches nothing rather than the whole box.
+    if record.get("catInfoId") is not None and cat.get("catInfoId") is not None:
+        return str(record["catInfoId"]) == str(cat["catInfoId"])
+    nickname = cat.get("nickname")
+    return nickname is not None and record.get("catNickname") == nickname
 
 
 def _visit_summary(record: dict[str, Any]) -> dict[str, Any]:

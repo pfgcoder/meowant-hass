@@ -15,7 +15,9 @@ from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-MQTT_STATE_RUNNING_POLL_SECONDS = 1
+# A state request now ends as soon as the box replies (about a second instead of a fixed 5 s
+# listen), so wait 5 s between polls while running to keep the old pace of one every ~6 s.
+MQTT_STATE_RUNNING_POLL_SECONDS = 5
 MQTT_STATE_PAUSED_POLL_SECONDS = 10
 MQTT_STATE_PENDING_POLL_SECONDS = 60
 MQTT_STATE_POLL_HEARTBEAT_SECONDS = 1
@@ -81,12 +83,23 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def last_mqtt_update_at(self, serial: str) -> datetime | None:
         return self._last_mqtt_update_at_by_serial.get(serial)
 
-    def set_mqtt_work_state(self, serial: str, state: dict[str, Any]) -> None:
-        mqtt_state = deepcopy(self._mqtt_state_by_serial.get(serial, {}))
+    def set_mqtt_work_state(self, serial: str, state: dict[str, Any]) -> dict[str, Any] | None:
+        """Show a guessed state until the box replies; returns the state it replaced."""
+        previous = self._mqtt_state_by_serial.get(serial)
+        mqtt_state = deepcopy(previous or {})
         mqtt_state.update(state)
         mqtt_state["optimistic"] = True
         mqtt_state["optimistic_updated_at"] = time.time()
         self._mqtt_state_by_serial[serial] = mqtt_state
+        self._update_runtime_data()
+        return previous
+
+    def restore_mqtt_work_state(self, serial: str, previous: dict[str, Any] | None) -> None:
+        """Undo set_mqtt_work_state when the command it guessed for wasn't sent."""
+        if previous is None:
+            self._mqtt_state_by_serial.pop(serial, None)
+        else:
+            self._mqtt_state_by_serial[serial] = previous
         self._update_runtime_data()
 
     def _update_runtime_data(self) -> None:
@@ -179,20 +192,25 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and not self._last_mqtt_update_at_by_serial
         ):
             return data
-        merged = deepcopy(data)
-        devices = merged.get("devices")
+        devices = data.get("devices")
         if not isinstance(devices, dict):
-            return merged
+            return data
+        # Copy only the levels that change: the records and config underneath are shared, not
+        # deep-copied on every MQTT update.
+        merged_devices: dict[str, Any] = {}
         for serial, item in devices.items():
             if not isinstance(item, dict):
+                merged_devices[serial] = item
                 continue
+            item = dict(item)
             if state := self._mqtt_state_by_serial.get(serial):
                 item["mqtt_state"] = deepcopy(state)
             item["runtime_state"] = {
                 "last_rest_update_at": self._last_rest_update_at,
                 "last_mqtt_update_at": self._last_mqtt_update_at_by_serial.get(serial),
             }
-        return merged
+            merged_devices[serial] = item
+        return {**data, "devices": merged_devices}
 
     def _schedule_next_mqtt_state_poll(self, serial: str) -> None:
         self._schedule_mqtt_state_poll(serial, self._mqtt_state_poll_delay(serial))

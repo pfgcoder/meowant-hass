@@ -63,10 +63,14 @@ class UbpetAutoCleanDelayNumber(CoordinatorEntity[UbpetDataUpdateCoordinator], N
 
     async def async_set_native_value(self, value: float) -> None:
         minutes = int(round(value))
+        item = self.coordinator.data.get("devices", {}).get(self._serial) or {}
+        # Keep auto clean as it is; only an unknown switch falls back to on, as before.
+        auto_clean = item.get("config", {}).get("sensorSwitch")
         await self.hass.async_add_executor_job(
             self.coordinator.client.set_auto_clean_delay,
             self._serial,
             minutes,
+            auto_clean is None or auto_clean == 1,
         )
         await self.coordinator.async_request_refresh()
 
