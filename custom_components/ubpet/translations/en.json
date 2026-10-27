@@ -56,6 +56,9 @@
       "visits_today": {
         "name": "Visits today"
       },
+      "cleans_today": {
+        "name": "Cleans today"
+      },
       "box_use_times": {
         "name": "Box use times"
       },

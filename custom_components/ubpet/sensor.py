@@ -23,6 +23,12 @@ class UbpetSensorDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], Any]
 
 
+# Record eventTypes. Cat records: 3 is a visit matched to a cat (21 is a weight the box couldn't
+# match). Device records: 31 is a finished auto clean, listed as "Auto cleaned" in the app.
+VISIT_EVENT = 3
+AUTO_CLEANED_EVENT = 31
+
+
 DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
     UbpetSensorDescription(
         key="box_status",
@@ -45,7 +51,15 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         icon="mdi:counter",
         translation_key="visits_today",
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda item: _visits_today(_cat_records(item)),
+        value_fn=lambda item: _count_today(_cat_records(item), VISIT_EVENT),
+    ),
+    UbpetSensorDescription(
+        key="cleans_today",
+        name="Cleans today",
+        icon="mdi:broom",
+        translation_key="cleans_today",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda item: _count_today(_device_records(item), AUTO_CLEANED_EVENT),
     ),
     UbpetSensorDescription(
         key="empty_waste_bin_reminder_days",
@@ -317,7 +331,7 @@ class UbpetCatSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity
             return None
         if self.entity_description.key == "cat_visits_today":
             records = [record for item in self.coordinator.data.get("devices", {}).values() for record in _cat_records(item)]
-            return _visits_today(records, cat.get("nickname"))
+            return _count_today(records, VISIT_EVENT, cat.get("nickname"))
         return self.entity_description.value_fn(cat)
 
     @property
@@ -437,15 +451,23 @@ def _empty_waste_bin_reminder_config(config: dict[str, Any]) -> dict[str, Any] |
 
 def _cat_records(item: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the box's visit records, newest first."""
-    records = item.get("cat_records")
+    return _records_newest_first(item.get("cat_records"))
+
+
+def _device_records(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the box's own records (cleans and the like), newest first."""
+    return _records_newest_first(item.get("device_records"))
+
+
+def _records_newest_first(records: Any) -> list[dict[str, Any]]:
     if not isinstance(records, list):
         return []
-    visits = [
+    dated = [
         record
         for record in records
         if isinstance(record, dict) and _milliseconds_to_datetime(record.get("eventTime")) is not None
     ]
-    return sorted(visits, key=lambda record: _milliseconds_to_datetime(record.get("eventTime")), reverse=True)
+    return sorted(dated, key=lambda record: _milliseconds_to_datetime(record.get("eventTime")), reverse=True)
 
 
 def _latest_cat_record(item: dict[str, Any]) -> dict[str, Any]:
@@ -464,8 +486,8 @@ def _last_visit_attributes(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _visits_today(records: list[dict[str, Any]], cat_nickname: str | None = None) -> int | None:
-    """Count named visits since local midnight, for one cat or for all of them."""
+def _count_today(records: list[dict[str, Any]], event_type: int, cat_nickname: str | None = None) -> int | None:
+    """Count records of one eventType since local midnight, optionally for one cat."""
     if not records:
         # The box always has some history, so no records means the request failed.
         return None
@@ -473,8 +495,7 @@ def _visits_today(records: list[dict[str, Any]], cat_nickname: str | None = None
     return sum(
         1
         for record in records
-        # eventType 3 is a visit matched to a cat; 21 is a weight the box couldn't match.
-        if record.get("eventType") == 3
+        if record.get("eventType") == event_type
         and _milliseconds_to_datetime(record.get("eventTime")) >= midnight
         and (cat_nickname is None or record.get("catNickname") == cat_nickname)
     )

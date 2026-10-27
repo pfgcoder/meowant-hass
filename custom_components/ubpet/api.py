@@ -363,7 +363,8 @@ class UbpetClient:
                 "online": _safe_dict_call(self.get_device_online, serial),
                 # A day's worth (about 15 a day with three cats) for the Visits today counts.
                 "cat_records": _safe_list_call(self.get_box_records, serial, 0, 50),
-                "device_records": _safe_list_call(self.get_box_records, serial, 1, 1),
+                # Likewise for the Cleans today count (about 6 cleans a day).
+                "device_records": _safe_list_call(self.get_box_records, serial, 1, 50),
             }
         return {
             "devices": by_serial,
