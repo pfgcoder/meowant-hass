@@ -40,6 +40,8 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._mqtt_state_poll_task: asyncio.Task[None] | None = None
         self._mqtt_state_request_started_at_by_serial: dict[str, datetime] = {}
         self._mqtt_state_polls_enabled = False
+        # Set when a refused login stopped the polls, so the next update that logs in restarts them.
+        self._mqtt_state_polls_paused_for_auth = False
         self._last_rest_update_at: datetime | None = None
         self._last_mqtt_update_at_by_serial: dict[str, datetime] = {}
         self._next_mqtt_poll_at_by_serial: dict[str, datetime] = {}
@@ -52,7 +54,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except UbpetAuthError as err:
             # The stored password was refused. Each retry is up to three logins and could lock the
             # account, so stop polling and let Home Assistant ask for the password (reauth).
-            self.cancel_mqtt_state_polls()
+            self._pause_mqtt_state_polls_for_auth()
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OSError, RuntimeError, UbpetApiError) as err:
             _LOGGER.exception("UPET data update failed")
@@ -68,6 +70,10 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._last_rest_update_at = datetime.now(UTC)
         data = self._with_runtime_state(data)
+        if self._mqtt_state_polls_paused_for_auth:
+            _LOGGER.info("UPET login works again; restarting MQTT state polls")
+            self._mqtt_state_polls_paused_for_auth = False
+            self._mqtt_state_polls_enabled = True
         if self._mqtt_state_polls_enabled:
             self._ensure_mqtt_state_poll_task()
             self._ensure_mqtt_state_polls(data)
@@ -121,6 +127,10 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._mqtt_state_polls_enabled = True
         self._ensure_mqtt_state_poll_task()
         self._ensure_mqtt_state_polls(self.data or {})
+
+    def _pause_mqtt_state_polls_for_auth(self) -> None:
+        self.cancel_mqtt_state_polls()
+        self._mqtt_state_polls_paused_for_auth = True
 
     def cancel_mqtt_state_polls(self) -> None:
         self._mqtt_state_polls_enabled = False
@@ -184,9 +194,10 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 MQTT_STATE_REQUEST_TIMEOUT_SECONDS,
             )
         except UbpetAuthError as err:
-            # Stop polling with a refused password; the next data update starts the reauth.
+            # Stop polling with a refused password. The next data update either logs in, which
+            # restarts the polls, or starts the reauth.
             _LOGGER.warning("UPET MQTT state poll stopped for %s: login refused: %s", serial, err)
-            self.cancel_mqtt_state_polls()
+            self._pause_mqtt_state_polls_for_auth()
         except (OSError, RuntimeError, UbpetApiError) as err:
             _LOGGER.warning("UPET MQTT state poll failed for %s: %s", serial, err)
         except Exception:

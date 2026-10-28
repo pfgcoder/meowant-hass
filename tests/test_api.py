@@ -781,6 +781,41 @@ class ApiUnitTests(unittest.TestCase):
             client.login()
         self.assertNotIsInstance(caught.exception, api.UbpetAuthError)
 
+    def test_login_failures_that_may_pass_are_not_auth_errors(self):
+        for failures in (
+            # Rate limited, timed out, forbidden: HTTP errors rather than a refusal.
+            [api.UbpetApiError(429, {"code": 429})] * 3,
+            [api.UbpetApiError(408, "timeout")] * 3,
+            # A reply without a token.
+            [api.UbpetApiError(200, {"code": 0, "data": {}})] * 3,
+            # Refused for two account types, but the third failed for another reason.
+            [api.UbpetApiError(200, {"code": 2004})] * 2 + [api.UbpetApiError(503, {})],
+        ):
+            client = self.make_client()
+            queued = list(failures)
+            client._login_with_account_type = lambda account_type, queued=queued: (_ for _ in ()).throw(queued.pop(0))
+
+            with self.subTest(failures=failures), self.assertRaises(api.UbpetApiError) as caught:
+                client.login()
+            self.assertNotIsInstance(caught.exception, api.UbpetAuthError)
+
+    def test_refused_login_during_the_optional_calls_fails_the_dashboard(self):
+        client = self.make_client()
+        client.auth = api.UbpetAuth(token="token", refresh_token=None, expires_at_ms=9999999999999, user_id=1)
+        client.get_devices = lambda: [{"serialNumber": "SN123"}]
+        calls = []
+
+        def refused(*args):
+            calls.append(args)
+            raise api.UbpetAuthError(200, {"code": 2004})
+
+        client.get_all_config = refused
+        client.get_box_use_times = refused
+
+        with self.assertRaises(api.UbpetAuthError):
+            client.get_dashboard()
+        self.assertEqual(len(calls), 1)
+
     def test_box_records_with_null_data_fail_as_an_api_error(self):
         client = self.make_client()
         client._request = lambda method, path, *, payload=None, auth: {"code": 0, "data": None}

@@ -128,6 +128,7 @@ class UbpetClient:
 
     def _login_unlocked(self) -> UbpetAuth:
         last_error: UbpetApiError | None = None
+        refused = True
         for account_type in _account_type_candidates(self.account):
             try:
                 _LOGGER.info(
@@ -146,10 +147,12 @@ class UbpetClient:
                     err,
                 )
                 last_error = err
+                refused = refused and _is_login_refusal(err)
         if last_error is not None:
-            if last_error.status < 500:
+            if refused:
                 # Every account type was answered and refused, so retrying the same password only
-                # risks a lockout; callers should ask for a new one.
+                # risks a lockout; callers should ask for a new one. Anything else (a rate limit, an
+                # HTTP error, a reply without a token) may pass, so it stays an error to retry.
                 raise UbpetAuthError(last_error.status, last_error.payload) from last_error
             raise last_error
         raise RuntimeError("no account type candidates")
@@ -472,6 +475,12 @@ def _account_type_candidates(account: str) -> tuple[str, ...]:
     return ("0", "1", "2")
 
 
+def _is_login_refusal(err: UbpetApiError) -> bool:
+    """Whether the server answered the login normally but with an error code, as it does for an
+    unknown account (code 2004). A wrong password is taken to be refused the same way."""
+    return err.status == 200 and isinstance(err.payload, dict) and err.payload.get("code") not in (None, 0)
+
+
 def _decode_response(raw: bytes) -> Any:
     text = raw.decode("utf-8", "replace")
     try:
@@ -601,6 +610,10 @@ def _summarize_mqtt_result(result: dict[str, Any], *, target_uid: str) -> dict[s
 def _safe_dict_call(func, *args) -> dict[str, Any]:
     try:
         return func(*args)
+    except UbpetAuthError:
+        # A refused login fails the whole update; swallowing it would retry the login on each
+        # remaining call.
+        raise
     except (OSError, RuntimeError, UbpetApiError) as err:
         _LOGGER.debug("UPET optional endpoint failed: %s", err)
         return {}
@@ -609,6 +622,8 @@ def _safe_dict_call(func, *args) -> dict[str, Any]:
 def _safe_list_call(func, *args) -> list[dict[str, Any]]:
     try:
         return func(*args)
+    except UbpetAuthError:
+        raise
     except (OSError, RuntimeError, UbpetApiError) as err:
         _LOGGER.debug("UPET optional endpoint failed: %s", err)
         return []

@@ -15,7 +15,12 @@ T = TypeVar("T")
 
 
 class _DataUpdateCoordinator(Generic[T]):
-    pass
+    def __init__(self, hass, logger, **kwargs):
+        self.hass = hass
+        self.data = None
+
+    def async_update_listeners(self):
+        pass
 
 
 def _module(name: str, **attrs) -> types.ModuleType:
@@ -116,6 +121,38 @@ class RefusedLoginTests(unittest.TestCase):
         with self.assertRaises(auth_failed):
             asyncio.run(coordinator._async_update_data())
         self.assertEqual(cancelled, [True])
+
+    def test_polls_stopped_by_a_refused_login_restart_when_login_works_again(self):
+        import asyncio
+
+        coordinator_module = load_coordinator_module()
+        api = sys.modules[f"{PACKAGE_NAME}.api"]
+
+        def refused(serial, service_id):
+            raise api.UbpetAuthError("login refused")
+
+        async def run_in_executor(func, *args):
+            return func(*args)
+
+        def create_task(coro):
+            coro.close()
+            return types.SimpleNamespace(done=lambda: False, cancel=lambda: None)
+
+        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor, async_create_task=create_task)
+        client = types.SimpleNamespace(
+            send_mqtt_service=refused,
+            get_dashboard=lambda: {"devices": {"SN1": {"device": {}}}, "cats": []},
+        )
+        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, client)
+        coordinator.data = {"devices": {"SN1": {}}}
+        coordinator._mqtt_state_polls_enabled = True
+
+        asyncio.run(coordinator.async_request_mqtt_state("SN1"))
+        self.assertFalse(coordinator._mqtt_state_polls_enabled)
+
+        asyncio.run(coordinator._async_update_data())
+        self.assertTrue(coordinator._mqtt_state_polls_enabled)
+        self.assertIn("SN1", coordinator._next_mqtt_poll_at_by_serial)
 
 
 if __name__ == "__main__":
