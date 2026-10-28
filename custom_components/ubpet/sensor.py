@@ -267,6 +267,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity):
+    _attr_has_entity_name = True
     entity_description: UbpetSensorDescription
 
     def __init__(self, coordinator: UbpetDataUpdateCoordinator, entry_id: str, serial: str, description: UbpetSensorDescription) -> None:
@@ -341,6 +342,7 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
 
 
 class UbpetCatSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity):
+    _attr_has_entity_name = True
     entity_description: UbpetSensorDescription
     # The photo's address on the vendor's storage stays out of the history database.
     _unrecorded_attributes = frozenset({"picture"})

@@ -122,6 +122,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class UbpetMqttCommandButton(CoordinatorEntity[UbpetDataUpdateCoordinator], ButtonEntity):
+    _attr_has_entity_name = True
     entity_description: UbpetMqttButtonDescription
 
     def __init__(

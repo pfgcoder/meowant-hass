@@ -36,6 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class UbpetAutoCleanDelayNumber(CoordinatorEntity[UbpetDataUpdateCoordinator], NumberEntity):
+    _attr_has_entity_name = True
     entity_description = AUTO_CLEAN_DELAY
 
     def __init__(self, coordinator: UbpetDataUpdateCoordinator, entry_id: str, serial: str) -> None:

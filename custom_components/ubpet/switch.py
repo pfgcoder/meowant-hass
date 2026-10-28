@@ -84,6 +84,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class UbpetBaseSwitch(CoordinatorEntity[UbpetDataUpdateCoordinator], SwitchEntity):
+    _attr_has_entity_name = True
     def __init__(self, coordinator: UbpetDataUpdateCoordinator, entry_id: str, serial: str, key: str) -> None:
         super().__init__(coordinator)
         self._serial = serial

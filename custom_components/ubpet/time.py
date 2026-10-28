@@ -82,6 +82,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class UbpetPeriodTime(CoordinatorEntity[UbpetDataUpdateCoordinator], TimeEntity):
+    _attr_has_entity_name = True
     entity_description: UbpetTimeDescription
 
     def __init__(
@@ -171,6 +172,7 @@ EMPTY_WASTE_BIN_REMINDER_TIME = TimeEntityDescription(
 
 
 class UbpetEmptyWasteBinReminderTime(CoordinatorEntity[UbpetDataUpdateCoordinator], TimeEntity):
+    _attr_has_entity_name = True
     entity_description = EMPTY_WASTE_BIN_REMINDER_TIME
 
     def __init__(self, coordinator: UbpetDataUpdateCoordinator, entry_id: str, serial: str) -> None:

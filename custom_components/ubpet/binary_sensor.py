@@ -75,6 +75,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class UbpetDeviceBinarySensor(CoordinatorEntity[UbpetDataUpdateCoordinator], BinarySensorEntity):
+    _attr_has_entity_name = True
     entity_description: UbpetBinarySensorDescription
 
     def __init__(self, coordinator: UbpetDataUpdateCoordinator, entry_id: str, serial: str, description: UbpetBinarySensorDescription) -> None:

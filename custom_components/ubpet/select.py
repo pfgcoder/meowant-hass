@@ -58,6 +58,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class UbpetEmptyWasteBinReminderDaysSelect(CoordinatorEntity[UbpetDataUpdateCoordinator], SelectEntity):
+    _attr_has_entity_name = True
     entity_description = EMPTY_WASTE_BIN_REMINDER_DAYS
     _attr_options = list(VALUES_BY_OPTION)
 
