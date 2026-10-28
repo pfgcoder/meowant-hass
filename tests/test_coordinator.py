@@ -78,6 +78,18 @@ class MqttStateReplyTests(unittest.TestCase):
     def setUp(self):
         self.coordinator = load_coordinator_module()
 
+    def test_reply_keeps_the_state_and_files_the_bookkeeping_apart(self):
+        reply = _state_reply("717401", "IDLE")
+        reply["decoded"].update({"cid": "cid-1", "risp_seq": 9, "new_decoder_field": 1, "w_cause": 90})
+
+        state = self.coordinator._latest_mqtt_state({"target_uid": "717401", "received_messages": [reply]})
+
+        self.assertEqual(
+            {key: value for key, value in state.items() if key != "message"},
+            {"w_mode_app_name": "IDLE", "w_state_app_name": "PENDING", "w_cause": 90},
+        )
+        self.assertEqual(state["message"]["cid"], "cid-1")
+
     def test_reply_from_the_box_sets_the_state(self):
         result = {"target_uid": "717401", "received_messages": [_state_reply("717401", "IDLE")]}
 
@@ -96,6 +108,28 @@ class MqttStateReplyTests(unittest.TestCase):
         result = {"received_messages": [_state_reply("717401", "IDLE")]}
 
         self.assertIsNone(self.coordinator._latest_mqtt_state(result))
+
+
+class PreviousRecordsTests(unittest.TestCase):
+    def test_records_that_failed_to_load_keep_the_last_ones(self):
+        coordinator = load_coordinator_module()
+        previous = {"devices": {"SN1": {"cat_records": [{"eventTime": 1}], "device_records": [{"eventTime": 2}]}}}
+        data = {"devices": {"SN1": {"cat_records": None, "device_records": []}, "SN2": {"cat_records": None}}}
+
+        coordinator._keep_previous_records(data, previous)
+
+        self.assertEqual(data["devices"]["SN1"]["cat_records"], [{"eventTime": 1}])
+        # Loaded but empty stays empty, and a box with nothing earlier stays without records.
+        self.assertEqual(data["devices"]["SN1"]["device_records"], [])
+        self.assertIsNone(data["devices"]["SN2"]["cat_records"])
+
+    def test_first_update_has_nothing_to_keep(self):
+        coordinator = load_coordinator_module()
+        data = {"devices": {"SN1": {"cat_records": None}}}
+
+        coordinator._keep_previous_records(data, None)
+
+        self.assertIsNone(data["devices"]["SN1"]["cat_records"])
 
 
 class GuessedStateTests(unittest.TestCase):
@@ -126,7 +160,7 @@ class GuessedStateTests(unittest.TestCase):
 
         self.coordinator.restore_mqtt_work_state("SN1", guess)
         self.assertEqual(self.state()["w_mode_app_name"], "IDLE")
-        self.assertNotIn("optimistic", self.state())
+        self.assertNotIn("guess", self.state())
 
     def test_a_reply_after_the_guess_is_not_undone(self):
         guess = self.coordinator.set_mqtt_work_state("SN1", {"w_state_app_name": "RUNNING"})

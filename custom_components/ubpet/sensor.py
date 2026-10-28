@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import UbpetDataUpdateCoordinator
+from .mqtt import STATE_FIELD_NAMES
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -32,35 +33,9 @@ AUTO_CLEANED_EVENT = 31
 # day, such as a record falling out of the fetched window, isn't read as a new meter cycle.
 TODAY_COUNT_KEYS = {"visits_today", "cleans_today", "cat_visits_today"}
 
-# Each MQTT reply's message bookkeeping (and the live scale reading), which differs on every poll.
-# Kept off the MQTT sensors' attributes so an unchanged poll doesn't write a new state row.
-MQTT_PER_REPLY_KEYS = frozenset(
-    {
-        "cid",
-        "gid",
-        "created_at_ms",
-        "from_uid",
-        "to_uid",
-        "received_phase",
-        "received_topic",
-        "received_qos",
-        "mqtt_service",
-        "command_cid",
-        "command_gid",
-        "command_created_at_ms",
-        "protocol_version",
-        "content_type",
-        "type_url",
-        "command_protype",
-        "risp_cmd",
-        "risp_seq",
-        "risp_attr",
-        "risp_data_len",
-        "risp_body_hex",
-        "timestamp",
-        "weigh_sensor",
-    }
-)
+# The box's state fields shown on the MQTT sensors, less the box's clock and the live scale reading,
+# which change on every poll: an unchanged poll then doesn't write a new state row.
+MQTT_ATTRIBUTE_FIELDS = STATE_FIELD_NAMES - {"timestamp", "weigh_sensor"}
 
 
 DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
@@ -84,7 +59,8 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         name="Last used by",
         icon="mdi:cat",
         translation_key="last_used_by",
-        value_fn=lambda item: _latest_visit(item).get("catNickname"),
+        # Remembers the last visit, so UbpetDeviceSensor.native_value works it out.
+        value_fn=lambda item: None,
     ),
     UbpetSensorDescription(
         key="visits_today",
@@ -298,6 +274,7 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
         self._serial = serial
         self.entity_description = description
         self._attr_unique_id = f"{entry_id}_{serial}_{description.key}"
+        self._last_visit: dict[str, Any] = {}
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -319,7 +296,16 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
         item = self.coordinator.data.get("devices", {}).get(self._serial)
         if not item:
             return None
+        if self.entity_description.key == "last_used_by":
+            return self._latest_visit(item).get("catNickname")
         return self.entity_description.value_fn(item)
+
+    def _latest_visit(self, item: dict[str, Any]) -> dict[str, Any]:
+        """The newest matched visit, or the last one seen when the records hold none (all weights the
+        box couldn't match), so the cat doesn't go to unknown and back."""
+        if visit := _latest_visit(item):
+            self._last_visit = visit
+        return self._last_visit
 
     @property
     def last_reset(self) -> datetime | None:
@@ -332,10 +318,8 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
         item = self.coordinator.data.get("devices", {}).get(self._serial)
         if not item:
             return None
-        return {
-            "serial_number": self._serial,
-            **self._extra_status_attributes(item),
-        }
+        # The serial number is on the device, so it isn't repeated here.
+        return self._extra_status_attributes(item) or None
 
     def _extra_status_attributes(self, item: dict[str, Any]) -> dict[str, Any]:
         if self.entity_description.key == "box_status":
@@ -346,24 +330,20 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
         if self.entity_description.key == "last_visit":
             return _last_visit_attributes(item)
         if self.entity_description.key == "last_used_by":
-            visit = _latest_visit(item)
+            visit = self._latest_visit(item)
             return _visit_summary(visit) if visit else {}
         if self.entity_description.key.startswith("mqtt_"):
             mqtt_state = item.get("mqtt_state")
             if not isinstance(mqtt_state, dict):
                 return {}
-            return {key: value for key, value in mqtt_state.items() if key not in MQTT_PER_REPLY_KEYS}
-        if self.entity_description.key in {
-            "last_rest_update",
-            "last_mqtt_update",
-        }:
-            runtime_state = item.get("runtime_state")
-            return runtime_state if isinstance(runtime_state, dict) else {}
+            return {key: value for key, value in mqtt_state.items() if key in MQTT_ATTRIBUTE_FIELDS}
         return {}
 
 
 class UbpetCatSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity):
     entity_description: UbpetSensorDescription
+    # The photo's address on the vendor's storage stays out of the history database.
+    _unrecorded_attributes = frozenset({"picture"})
 
     def __init__(self, coordinator: UbpetDataUpdateCoordinator, entry_id: str, cat_id: str, description: UbpetSensorDescription) -> None:
         super().__init__(coordinator)

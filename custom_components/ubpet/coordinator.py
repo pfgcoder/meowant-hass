@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import UbpetApiError, UbpetAuthError, UbpetClient
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .mqtt import STATE_FIELD_NAMES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,6 +25,8 @@ MQTT_STATE_PENDING_POLL_SECONDS = 60
 MQTT_STATE_POLL_HEARTBEAT_SECONDS = 1
 MQTT_STATE_REQUEST_TIMEOUT_SECONDS = 30
 MQTT_STATE_IN_PROGRESS_STALE_SECONDS = 45
+# Each box's visit and clean records, from get_dashboard.
+RECORD_KEYS = ("cat_records", "device_records")
 
 
 class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -71,6 +74,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             len(cats) if isinstance(cats, list) else 0,
         )
         self._last_rest_update_at = datetime.now(UTC)
+        _keep_previous_records(data, self.data)
         data = self._with_runtime_state(data)
         if self._mqtt_state_polls_paused_for_auth:
             _LOGGER.info("UPET login works again; restarting MQTT state polls")
@@ -101,9 +105,9 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def set_mqtt_work_state(self, serial: str, state: dict[str, Any]) -> dict[str, Any]:
         """Show a guessed state until the box replies; returns the guess."""
         mqtt_state = deepcopy(self._mqtt_state_by_serial.get(serial) or {})
-        mqtt_state.update(state)
-        mqtt_state["optimistic"] = True
-        mqtt_state["optimistic_updated_at"] = time.time()
+        mqtt_state.pop("message", None)
+        mqtt_state.update({key: value for key, value in state.items() if key in STATE_FIELD_NAMES})
+        mqtt_state["guess"] = {"mqtt_service": state.get("mqtt_service"), "at": time.time()}
         self._mqtt_state_by_serial[serial] = mqtt_state
         self._update_runtime_data()
         return mqtt_state
@@ -299,6 +303,21 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return True
 
 
+def _keep_previous_records(data: dict[str, Any], previous: dict[str, Any] | None) -> None:
+    """Fill in records that failed to load (None) with the last ones, so Last visit, Last used by and
+    the today counts don't drop to unknown and back, re-firing automations."""
+    devices = data.get("devices")
+    if not isinstance(devices, dict):
+        return
+    previous_devices = (previous or {}).get("devices") or {}
+    for serial, item in devices.items():
+        if not isinstance(item, dict):
+            continue
+        for key in RECORD_KEYS:
+            if item.get(key) is None:
+                item[key] = (previous_devices.get(serial) or {}).get(key)
+
+
 def _latest_mqtt_state(result: dict[str, Any] | object) -> dict[str, Any] | None:
     if not isinstance(result, dict):
         return None
@@ -322,8 +341,13 @@ def _latest_mqtt_state(result: dict[str, Any] | object) -> dict[str, Any] | None
             continue
         if "w_mode_app_name" not in decoded and "w_state_app_name" not in decoded:
             continue
-        latest = {
+        # Only the box's state fields, so a new field from the decoder can't add per-reply noise.
+        latest = {key: value for key, value in decoded.items() if key in STATE_FIELD_NAMES and value not in (None, "")}
+        # The message's bookkeeping, which differs on every reply, kept apart from the state.
+        latest["message"] = {
             "cid": decoded.get("cid"),
+            "gid": decoded.get("gid"),
+            "created_at_ms": decoded.get("created_at_ms"),
             "from_uid": decoded.get("from_uid"),
             "to_uid": decoded.get("to_uid"),
             "received_phase": message.get("phase"),
@@ -334,14 +358,6 @@ def _latest_mqtt_state(result: dict[str, Any] | object) -> dict[str, Any] | None
             "command_gid": result.get("gid"),
             "command_created_at_ms": result.get("created_at_ms"),
         }
-        for key, value in decoded.items():
-            if key in {
-                "payload_hex",
-                "raw_hex",
-            }:
-                continue
-            if value not in (None, ""):
-                latest[key] = value
     return latest
 
 

@@ -834,6 +834,33 @@ class ApiUnitTests(unittest.TestCase):
         with self.assertRaises(api.UbpetApiError):
             client.get_box_records("SN123", 0, 50)
 
+    def test_box_records_in_another_shape_fail_as_an_api_error(self):
+        for data in ([{"records": []}], "records", {"records": None}):
+            client = self.make_client()
+            client._request = lambda method, path, *, payload=None, auth, data=data: {"code": 0, "data": data}
+
+            with self.subTest(data=data), self.assertRaises(api.UbpetApiError):
+                client.get_box_records("SN123", 0, 50)
+
+    def test_dashboard_marks_records_that_failed_to_load(self):
+        client = self.make_client()
+        client.auth = api.UbpetAuth(token="token", refresh_token=None, expires_at_ms=9999999999999, user_id=1)
+        client.get_devices = lambda: [{"serialNumber": "SN123"}]
+        for name in ("get_all_config", "get_box_use_times", "get_deodorant_status", "get_device_online"):
+            setattr(client, name, lambda serial: {})
+        client.get_cats = lambda: []
+
+        def get_box_records(serial, message_type, size=1):
+            if message_type == 1:
+                raise api.UbpetApiError(500, {})
+            return []
+
+        client.get_box_records = get_box_records
+        device = client.get_dashboard()["devices"]["SN123"]
+
+        self.assertEqual(device["cat_records"], [])
+        self.assertIsNone(device["device_records"])
+
     def test_auto_clean_delay_keeps_the_switch_as_it_is(self):
         client = self.make_client()
         sent = []
@@ -990,7 +1017,11 @@ class DiagnosticsUnitTests(unittest.TestCase):
                             "gmtTimeZone": "GMT+03:00",
                             "boxFunctionVOList": [{"firmwareVersion": "main_v1"}],
                         },
-                        "mqtt_state": {"from_uid": "717401", "to_uid": "717422", "w_mode": 0},
+                        "mqtt_state": {
+                            "w_mode": 0,
+                            "weigh_sensor": 4321,
+                            "message": {"from_uid": "717401", "to_uid": "717422"},
+                        },
                         "cat_records": [{"catNickname": "Whiskers", "eventTime": 1}],
                         "device_records": [{"eventType": 31, "eventTime": 2}],
                     }
@@ -1023,7 +1054,7 @@ class DiagnosticsUnitTests(unittest.TestCase):
         for private in (
             "FAT010SERIAL", "1234567", "717401", "717422", "My_IoT", "Whiskers", "3.3",
             "private.example", "user@example.com", "hunter2", "phone-id", "app-key-value",
-            "owner_nick", "203.0.113.7", "7654321", "3.4", "2022-07-09",
+            "owner_nick", "203.0.113.7", "7654321", "3.4", "2022-07-09", "Litter Box", "4321",
         ):
             self.assertNotIn(private, text)
         device = result["data"]["devices"]["device_1"]
@@ -1033,7 +1064,7 @@ class DiagnosticsUnitTests(unittest.TestCase):
         self.assertEqual(device["config"]["gmtTimeZone"], "GMT+03:00")
         self.assertEqual(device["config"]["boxFunctionVOList"], [{"firmwareVersion": "main_v1"}])
         self.assertEqual(device["mqtt_state"]["w_mode"], 0)
-        self.assertEqual(result["data"]["cats"][0]["catInfoId"], 5)
+        self.assertEqual(result["data"]["cats"][0]["catInfoId"], "**REDACTED**")
 
 
 if __name__ == "__main__":

@@ -53,6 +53,13 @@ ALL_STATE_FIELD_NAMES = {
     19: "weigh_sensor",
     20: "led_state",
 }
+# Every field summarize_all_state_body can give, the box's whole state.
+STATE_FIELD_NAMES = frozenset(ALL_STATE_FIELD_NAMES.values()) | {
+    "w_mode_name",
+    "w_mode_app_name",
+    "w_state_name",
+    "w_state_app_name",
+}
 WORK_MODE_NAMES = {
     0: "idle",
     1: "reset",

@@ -317,8 +317,10 @@ class UbpetClient:
             "messageType": message_type,
         }
         data = self._request("POST", "/catbox-server/web/box/record/new", payload=payload, auth=True)
-        # The server can send "data": null, which must read as a failed call, not crash the refresh.
-        records = (data.get("data") or {}).get("records") if isinstance(data, dict) else None
+        # Anything but {"data": {"records": [...]}} (the server can send "data": null) must read as a
+        # failed call, not crash the refresh.
+        body = data.get("data") if isinstance(data, dict) else None
+        records = body.get("records") if isinstance(body, dict) else None
         if not isinstance(records, list):
             raise UbpetApiError(200, data)
         return [record for record in records if isinstance(record, dict)]
@@ -412,10 +414,11 @@ class UbpetClient:
                 "box_use_times": _safe_dict_call(self.get_box_use_times, serial),
                 "deodorant": _safe_dict_call(self.get_deodorant_status, serial),
                 "online": _safe_dict_call(self.get_device_online, serial),
-                # A day's worth (about 15 a day with three cats) for the Visits today counts.
-                "cat_records": _safe_list_call(self.get_box_records, serial, 0, 50),
+                # A day's worth (about 15 a day with three cats) for the Visits today counts. None
+                # when the call failed, so the update can keep the last records instead.
+                "cat_records": _optional_list_call(self.get_box_records, serial, 0, 50),
                 # Likewise for the Cleans today count (about 6 cleans a day).
-                "device_records": _safe_list_call(self.get_box_records, serial, 1, 50),
+                "device_records": _optional_list_call(self.get_box_records, serial, 1, 50),
             }
         return {
             "devices": by_serial,
@@ -639,10 +642,16 @@ def _safe_dict_call(func, *args) -> dict[str, Any]:
 
 
 def _safe_list_call(func, *args) -> list[dict[str, Any]]:
+    result = _optional_list_call(func, *args)
+    return [] if result is None else result
+
+
+def _optional_list_call(func, *args) -> list[dict[str, Any]] | None:
+    """Like _safe_list_call, but None when the call failed rather than returned nothing."""
     try:
         return func(*args)
     except UbpetAuthError:
         raise
     except (OSError, RuntimeError, UbpetApiError) as err:
         _LOGGER.debug("UPET optional endpoint failed: %s", err)
-        return []
+        return None

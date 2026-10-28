@@ -24,6 +24,8 @@ TO_REDACT = {
     "adminUserNickName",
     "device_id",
     "deviceId",
+    # Like the entry title, the box's name or its serial number.
+    "deviceName",
     "from_uid",
     "ip",
     "received_topic",
@@ -37,10 +39,13 @@ TO_REDACT = {
     # The cats
     "baseWeight",
     "birthday",
+    "catInfoId",
     "catNickname",
     "icon",
     "nickname",
     "weight",
+    # The live scale reading in the MQTT state: a cat's weight while one is in the box.
+    "weigh_sensor",
 }
 
 # Each box's visit and clean history: a timeline of every cat's litter box use.
