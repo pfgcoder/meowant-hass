@@ -53,6 +53,19 @@
       "reauth_successful": "Logged in again. The integration has reloaded."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Meowant options",
+        "data": {
+          "records_per_fetch": "Records per fetch"
+        },
+        "data_description": {
+          "records_per_fetch": "How many of each box's latest visit and clean records each update fetches. Raise it if Visits today or Cleans today miss some: three cats make about 15 visits a day."
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "box_status": {

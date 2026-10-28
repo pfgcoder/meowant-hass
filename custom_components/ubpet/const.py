@@ -26,6 +26,8 @@ CONF_DEVICE_ID = "device_id"
 CONF_BASE_URL = "base_url"
 CONF_PRODUCT = "product"
 CONF_PROFILE = "profile"
+# Option: how many of each box's latest visit and clean records each update fetches.
+CONF_RECORDS_PER_FETCH = "records_per_fetch"
 
 EU_BASE_URL = "https://apis-eu.airrobo-home.com"
 RUSSIA_BASE_URL = "https://apis-ru.airrobo-home.com"

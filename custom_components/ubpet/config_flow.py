@@ -12,7 +12,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from . import client_from_entry_data
-from .api import UbpetApiError, UbpetAuthError, UbpetClient
+from .api import DEFAULT_RECORDS_PER_FETCH, UbpetApiError, UbpetAuthError, UbpetClient
 from .const import (
     CONF_AREA_CODE,
     CONF_APP_ID,
@@ -22,15 +22,14 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_PRODUCT,
     CONF_PROFILE,
-    DEFAULT_APP_ID,
-    DEFAULT_APP_KEY,
-    DEFAULT_PRODUCT,
+    CONF_RECORDS_PER_FETCH,
     DOMAIN,
     SUPPORTED_COUNTRIES,
     base_url_for_country,
 )
 from .profiles import (
     ACCOUNT_PROFILES,
+    AccountProfile,
     DEFAULT_PROFILE,
     PROFILE_MEOWANT,
     PROFILE_UPET,
@@ -58,20 +57,21 @@ def _profile_schema(default: str | None = None) -> vol.Schema:
     )
 
 
-def _credential_fields(defaults: dict[str, Any]) -> dict[Any, Any]:
+def _credential_fields(defaults: dict[str, Any], profile: AccountProfile) -> dict[Any, Any]:
     fields: dict[Any, Any] = {
         vol.Required(CONF_USERNAME, default=defaults.get(CONF_USERNAME, "")): str,
         vol.Required(CONF_PASSWORD): selector.TextSelector(
             selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
         ),
     }
-    if not DEFAULT_APP_KEY:
+    # Ask only for what the chosen app's bundled values lack.
+    if not profile.app_key:
         fields[vol.Required(CONF_APP_KEY, default=defaults.get(CONF_APP_KEY, ""))] = selector.TextSelector(
             selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
         )
-    if not DEFAULT_APP_ID:
+    if not profile.app_id:
         fields[vol.Required(CONF_APP_ID, default=defaults.get(CONF_APP_ID, ""))] = str
-    if not DEFAULT_PRODUCT:
+    if not profile.product:
         fields[vol.Required(CONF_PRODUCT, default=defaults.get(CONF_PRODUCT, ""))] = str
     return fields
 
@@ -79,6 +79,7 @@ def _credential_fields(defaults: dict[str, Any]) -> dict[Any, Any]:
 def _account_schema(
     defaults: dict[str, Any] | None = None,
     *,
+    profile: AccountProfile,
     allowed_countries: tuple[str, ...] | None,
     default_country: str | None = None,
 ) -> vol.Schema:
@@ -99,7 +100,7 @@ def _account_schema(
     return vol.Schema(
         {
             country_field: selector.CountrySelector(selector_config),
-            **_credential_fields(defaults),
+            **_credential_fields(defaults, profile),
         }
     )
 
@@ -113,6 +114,8 @@ def _iso_country(value: Any) -> str | None:
 
 class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
+    # 1.2: the account in the unique ID is lower-cased (async_migrate_entry).
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._profile_id: str | None = None
@@ -145,7 +148,12 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             country = _iso_country(user_input.get(CONF_COUNTRY)) or ""
         return await self._async_account_step(
             step_id="meowant",
-            schema=_account_schema(user_input, allowed_countries=None, default_country=configured_country),
+            schema=_account_schema(
+                user_input,
+                profile=get_profile(self._profile_id),
+                allowed_countries=None,
+                default_country=configured_country,
+            ),
             user_input=user_input,
             country=country,
         )
@@ -163,6 +171,7 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="upet",
             schema=_account_schema(
                 user_input,
+                profile=get_profile(self._profile_id),
                 allowed_countries=SUPPORTED_COUNTRIES,
                 default_country=configured_country,
             ),
@@ -279,15 +288,28 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return UbpetOptionsFlow(config_entry)
+        return UbpetOptionsFlow()
 
 
 class UbpetOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self._config_entry = config_entry
-
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
-        return self.async_create_entry(title="", data={})
+        if user_input is not None:
+            return self.async_create_entry(
+                data={CONF_RECORDS_PER_FETCH: int(user_input[CONF_RECORDS_PER_FETCH])},
+            )
+        records_per_fetch = self.config_entry.options.get(CONF_RECORDS_PER_FETCH, DEFAULT_RECORDS_PER_FETCH)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_RECORDS_PER_FETCH, default=records_per_fetch): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=10, max=500, step=10, mode=selector.NumberSelectorMode.BOX
+                        )
+                    ),
+                }
+            ),
+        )
 
 
 def _connection_data(profile, user_input: dict[str, Any], country: str) -> dict[str, Any]:

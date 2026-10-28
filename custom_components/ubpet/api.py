@@ -41,6 +41,9 @@ QUICK_MQTT_REPLY_SERVICES = {
     "start_rise",
     "start_drop",
 }
+# A day's worth of visits (about 15 a day with three cats) and of cleans (about 6), for the
+# today counts. Households with more cats can raise it in the integration's options.
+DEFAULT_RECORDS_PER_FETCH = 50
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -91,6 +94,7 @@ class UbpetClient:
         app_id: str,
         product: str,
         area_code: str = "",
+        records_per_fetch: int = DEFAULT_RECORDS_PER_FETCH,
     ) -> None:
         self.account = account
         self.password = password
@@ -99,6 +103,7 @@ class UbpetClient:
         self.app_id = app_id
         self.product = product
         self.area_code = area_code
+        self.records_per_fetch = records_per_fetch
         self.signer = UbtV2Signer(app_key)
         self.auth: UbpetAuth | None = None
         self._auth_lock = threading.Lock()
@@ -414,11 +419,10 @@ class UbpetClient:
                 "box_use_times": _safe_dict_call(self.get_box_use_times, serial),
                 "deodorant": _safe_dict_call(self.get_deodorant_status, serial),
                 "online": _safe_dict_call(self.get_device_online, serial),
-                # A day's worth (about 15 a day with three cats) for the Visits today counts. None
-                # when the call failed, so the update can keep the last records instead.
-                "cat_records": _optional_list_call(self.get_box_records, serial, 0, 50),
-                # Likewise for the Cleans today count (about 6 cleans a day).
-                "device_records": _optional_list_call(self.get_box_records, serial, 1, 50),
+                # Visits, then cleans. None when the call failed, so the update can keep the last
+                # records instead.
+                "cat_records": _optional_list_call(self.get_box_records, serial, 0, self.records_per_fetch),
+                "device_records": _optional_list_call(self.get_box_records, serial, 1, self.records_per_fetch),
             }
         return {
             "devices": by_serial,
