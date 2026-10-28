@@ -7,6 +7,7 @@ import sys
 import types
 from typing import Generic, TypeVar
 import unittest
+from unittest.mock import patch
 
 
 COMPONENT_PATH = Path(__file__).resolve().parents[1] / "custom_components" / "ubpet"
@@ -26,36 +27,42 @@ class _DataUpdateCoordinator(Generic[T]):
 def _module(name: str, **attrs) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__dict__.update(attrs)
-    sys.modules.setdefault(name, module)
-    return sys.modules[name]
+    return module
 
 
 def load_coordinator_module():
-    _module("homeassistant")
-    _module("homeassistant.helpers")
-    _module("homeassistant.core").HomeAssistant = object
-    update_coordinator = _module("homeassistant.helpers.update_coordinator")
-    update_coordinator.DataUpdateCoordinator = getattr(update_coordinator, "DataUpdateCoordinator", _DataUpdateCoordinator)
-    update_coordinator.UpdateFailed = getattr(update_coordinator, "UpdateFailed", Exception)
-    exceptions = _module("homeassistant.exceptions")
-    exceptions.ConfigEntryAuthFailed = getattr(
-        exceptions, "ConfigEntryAuthFailed", type("ConfigEntryAuthFailed", (Exception,), {})
-    )
-    package = types.ModuleType(PACKAGE_NAME)
-    package.__path__ = [str(COMPONENT_PATH)]
-    sys.modules[PACKAGE_NAME] = package
+    """Load coordinator.py against stand-ins for Home Assistant and api.py, removed once loaded."""
+    package = _module(PACKAGE_NAME, __path__=[str(COMPONENT_PATH)])
     api_error = type("UbpetApiError", (RuntimeError,), {})
-    sys.modules[f"{PACKAGE_NAME}.api"] = types.SimpleNamespace(
-        UbpetApiError=api_error,
-        UbpetAuthError=type("UbpetAuthError", (api_error,), {}),
-        UbpetClient=object,
-    )
-    sys.modules[f"{PACKAGE_NAME}.const"] = types.SimpleNamespace(DEFAULT_SCAN_INTERVAL=timedelta(minutes=3), DOMAIN="ubpet")
+    stubs = {
+        "homeassistant": _module("homeassistant"),
+        "homeassistant.helpers": _module("homeassistant.helpers"),
+        "homeassistant.core": _module("homeassistant.core", HomeAssistant=object),
+        "homeassistant.helpers.update_coordinator": _module(
+            "homeassistant.helpers.update_coordinator",
+            DataUpdateCoordinator=_DataUpdateCoordinator,
+            UpdateFailed=type("UpdateFailed", (Exception,), {}),
+        ),
+        "homeassistant.exceptions": _module(
+            "homeassistant.exceptions", ConfigEntryAuthFailed=type("ConfigEntryAuthFailed", (Exception,), {})
+        ),
+        PACKAGE_NAME: package,
+        f"{PACKAGE_NAME}.api": _module(
+            f"{PACKAGE_NAME}.api",
+            UbpetApiError=api_error,
+            UbpetAuthError=type("UbpetAuthError", (api_error,), {}),
+            UbpetClient=object,
+        ),
+        f"{PACKAGE_NAME}.const": _module(
+            f"{PACKAGE_NAME}.const", DEFAULT_SCAN_INTERVAL=timedelta(minutes=3), DOMAIN="ubpet"
+        ),
+    }
     spec = importlib.util.spec_from_file_location(f"{PACKAGE_NAME}.coordinator", COMPONENT_PATH / "coordinator.py")
     coordinator = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    sys.modules[spec.name] = coordinator
-    spec.loader.exec_module(coordinator)
+    with patch.dict(sys.modules, stubs):
+        sys.modules[spec.name] = coordinator
+        spec.loader.exec_module(coordinator)
     return coordinator
 
 
@@ -188,11 +195,10 @@ class RefusedLoginTests(unittest.TestCase):
         import asyncio
 
         coordinator_module = load_coordinator_module()
-        api = sys.modules[f"{PACKAGE_NAME}.api"]
-        auth_failed = sys.modules["homeassistant.exceptions"].ConfigEntryAuthFailed
+        auth_failed = coordinator_module.ConfigEntryAuthFailed
 
         def get_dashboard():
-            raise api.UbpetAuthError("login refused")
+            raise coordinator_module.UbpetAuthError("login refused")
 
         async def run_in_executor(func, *args):
             return func(*args)
@@ -211,10 +217,9 @@ class RefusedLoginTests(unittest.TestCase):
         import asyncio
 
         coordinator_module = load_coordinator_module()
-        api = sys.modules[f"{PACKAGE_NAME}.api"]
 
         def refused(serial, service_id):
-            raise api.UbpetAuthError("login refused")
+            raise coordinator_module.UbpetAuthError("login refused")
 
         async def run_in_executor(func, *args):
             return func(*args)

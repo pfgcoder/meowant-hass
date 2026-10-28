@@ -952,14 +952,10 @@ class ApiUnitTests(unittest.TestCase):
 def load_diagnostics_module():
     import types
 
-    hass_module = types.ModuleType("homeassistant")
     config_entries_module = types.ModuleType("homeassistant.config_entries")
     core_module = types.ModuleType("homeassistant.core")
     config_entries_module.ConfigEntry = object
     core_module.HomeAssistant = object
-    sys.modules.setdefault("homeassistant", hass_module)
-    sys.modules.setdefault("homeassistant.config_entries", config_entries_module)
-    sys.modules.setdefault("homeassistant.core", core_module)
 
     # Behaves like Home Assistant's: redacts listed keys at any depth, leaving None and "" alone.
     diagnostics_component = types.ModuleType("homeassistant.components.diagnostics")
@@ -978,19 +974,27 @@ def load_diagnostics_module():
         }
 
     diagnostics_component.async_redact_data = async_redact_data
-    sys.modules.setdefault("homeassistant.components", types.ModuleType("homeassistant.components"))
-    sys.modules["homeassistant.components.diagnostics"] = diagnostics_component
 
     const_module = types.ModuleType("ubpet_diagnostics_test.const")
     const_module.DOMAIN = "ubpet"
-    sys.modules["ubpet_diagnostics_test.const"] = const_module
 
     path = Path(__file__).resolve().parents[1] / "custom_components" / "ubpet" / "diagnostics.py"
     diag_spec = importlib.util.spec_from_file_location("ubpet_diagnostics_test.diagnostics", path)
     diagnostics = importlib.util.module_from_spec(diag_spec)
     assert diag_spec.loader is not None
-    sys.modules[diag_spec.name] = diagnostics
-    diag_spec.loader.exec_module(diagnostics)
+    # The stand-ins are removed again once diagnostics.py has loaded, so other tests don't see them.
+    with patch.dict(
+        sys.modules,
+        {
+            "homeassistant": types.ModuleType("homeassistant"),
+            "homeassistant.config_entries": config_entries_module,
+            "homeassistant.core": core_module,
+            "homeassistant.components": types.ModuleType("homeassistant.components"),
+            "homeassistant.components.diagnostics": diagnostics_component,
+            "ubpet_diagnostics_test.const": const_module,
+        },
+    ):
+        diag_spec.loader.exec_module(diagnostics)
     return diagnostics
 
 

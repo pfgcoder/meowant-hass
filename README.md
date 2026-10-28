@@ -18,6 +18,7 @@ For safer use, create a separate UPET/Airrobo account and share litter box acces
 - Selectable account provider so credentials are routed to the correct vendor tenant.
 - Device discovery from the vendor cloud account.
 - Read-only box, waste-bin, deodorant, online, and firmware data.
+- Visit and clean history: last visit, the cat that last used the box, and today's visits (per box and per cat) and cleans.
 - Cat profile sensors and cat picture URL attributes when returned by the API.
 - Config controls for confirmed settings:
   - Auto clean delay.
@@ -43,6 +44,10 @@ For safer use, create a separate UPET/Airrobo account and share litter box acces
   - Last successful MQTT status update.
 - Diagnostics download with sanitized raw API/coordinator data.
 - Local brand icons for supported Home Assistant versions.
+
+## Requirements
+
+Home Assistant 2024.12 or newer.
 
 ## Installation
 
@@ -94,11 +99,25 @@ If you maintain a private deployment and want to override the bundled app creden
 use `custom_components/ubpet/secrets.py.example` as a template for a private
 `secrets.py`.
 
+If the vendor refuses the stored password (for example after it was changed in the app),
+Home Assistant stops updating and asks for the current password under
+`Settings -> Devices & services`. Other login failures, such as a rate limit or an
+outage, are retried at the next update instead.
+
+Options (`Settings -> Devices & services -> Meowant -> Configure`):
+
+- `Records per fetch` (default 50): how many of each box's latest visit and clean records
+  each update fetches. The today counts and Last visit are worked out from these, so raise
+  it if Visits today or Cleans today miss some. Three cats make about 15 visits a day.
+
 ## Entities
 
 Device sensors:
 
 - Box status.
+- Last visit (time of the newest visit record, with the five most recent as attributes).
+- Last used by (the cat on the newest visit matched to a cat; weights the box couldn't match are skipped).
+- Visits today and Cleans today (restart at local midnight).
 - Empty waste-bin reminder days.
 - Box use times.
 - Waste-bin level.
@@ -112,8 +131,10 @@ Device sensors:
 - MQTT work mode.
 - MQTT work state.
 - MQTT work cause.
-- Last REST update.
-- Last MQTT update.
+- Last REST update and Last MQTT update. Disabled by default because they change on every
+  poll; enable them under the entity's settings if you need them.
+
+Entity names include the device name, for example `Litter Box Visits today` and `Tiny Visits today`.
 
 Device binary sensors:
 
@@ -153,8 +174,10 @@ Cat sensors:
 - Weight.
 - Visits.
 - Usage duration.
+- Visits today.
 
-Cat picture URLs are exposed as cat entity attributes when returned by the vendor API.
+Cat picture URLs are exposed as cat entity attributes when returned by the vendor API. They
+are left out of the recorder's history.
 
 ## MQTT Behavior
 
@@ -164,9 +187,13 @@ The integration obtains MQTT credentials and topics from the vendor API, publish
 
 Polling intervals:
 
-- `RUNNING`: every 1 second.
+- `RUNNING`: 5 seconds after each reply (the box answers in about a second).
 - `PAUSED`: every 10 seconds.
 - `PENDING`/standby/unknown: every 60 seconds.
+
+A state request ends as soon as the box replies. If the broker refuses the cached MQTT login,
+the integration logs in to IM again and retries once; nothing has been published at that point,
+so a command is never sent twice.
 
 MQTT polling starts after Home Assistant finishes setting up the integration, so startup is not blocked by MQTT traffic.
 
@@ -227,8 +254,12 @@ The current tests cover:
 - Authenticated request headers.
 - Dashboard aggregation.
 - Settings payload builders.
-- IM credential/contact lookup.
+- IM credential/contact lookup and retry.
 - MQTT codec, packet helpers, RISP/protobuf payload generation, and service ordinals.
+- Coordinator: reauth, MQTT state replies, guessed states and kept records.
+- Sensors: Last used by, today counts, cat matching and attribute filtering.
+- Setup: unique ID migration and the records option.
+- Entity naming and translations.
 - Diagnostics redaction.
 
 ## Implementation Notes

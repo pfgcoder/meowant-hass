@@ -5,13 +5,13 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 COMPONENT_PATH = Path(__file__).resolve().parents[1] / "custom_components" / "ubpet"
 PACKAGE_NAME = "ubpet_profiles_test"
 package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(COMPONENT_PATH)]
-sys.modules[PACKAGE_NAME] = package
 
 spec = importlib.util.spec_from_file_location(
     f"{PACKAGE_NAME}.profiles",
@@ -19,8 +19,10 @@ spec = importlib.util.spec_from_file_location(
 )
 profiles = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
-sys.modules[spec.name] = profiles
-spec.loader.exec_module(profiles)
+# The package is only needed while profiles.py loads (for its import of secrets.py).
+with patch.dict(sys.modules, {PACKAGE_NAME: package}):
+    sys.modules[spec.name] = profiles
+    spec.loader.exec_module(profiles)
 
 
 class AccountProfileTests(unittest.TestCase):
