@@ -98,6 +98,57 @@ class MqttStateReplyTests(unittest.TestCase):
         self.assertIsNone(self.coordinator._latest_mqtt_state(result))
 
 
+class GuessedStateTests(unittest.TestCase):
+    def setUp(self):
+        coordinator_module = load_coordinator_module()
+        self.coordinator = coordinator_module.UbpetDataUpdateCoordinator(types.SimpleNamespace(), None)
+        self.coordinator._last_rest_update_at = coordinator_module.datetime.now(coordinator_module.UTC)
+        self.coordinator.data = {"devices": {"SN1": {}}}
+
+    def state(self):
+        return self.coordinator.data["devices"]["SN1"].get("mqtt_state")
+
+    def reply(self, mode):
+        self.coordinator.store_mqtt_result(
+            "SN1", {"target_uid": "717401", "received_messages": [_state_reply("717401", mode)]}
+        )
+
+    def test_undoing_a_guess_before_any_reply_clears_it(self):
+        guess = self.coordinator.set_mqtt_work_state("SN1", {"w_state_app_name": "RUNNING"})
+        self.assertEqual(self.state()["w_state_app_name"], "RUNNING")
+
+        self.coordinator.restore_mqtt_work_state("SN1", guess)
+        self.assertIsNone(self.state())
+
+    def test_undoing_a_guess_goes_back_to_the_last_reply(self):
+        self.reply("IDLE")
+        guess = self.coordinator.set_mqtt_work_state("SN1", {"w_mode_app_name": "CLEANING"})
+
+        self.coordinator.restore_mqtt_work_state("SN1", guess)
+        self.assertEqual(self.state()["w_mode_app_name"], "IDLE")
+        self.assertNotIn("optimistic", self.state())
+
+    def test_a_reply_after_the_guess_is_not_undone(self):
+        guess = self.coordinator.set_mqtt_work_state("SN1", {"w_state_app_name": "RUNNING"})
+        self.reply("CLEANING")
+
+        self.coordinator.restore_mqtt_work_state("SN1", guess)
+        self.assertEqual(self.state()["w_mode_app_name"], "CLEANING")
+
+    def test_two_failed_presses_leave_no_guess_behind(self):
+        for order in ((0, 1), (1, 0)):
+            self.reply("IDLE")
+            guesses = [
+                self.coordinator.set_mqtt_work_state("SN1", {"w_mode_app_name": "CLEANING"}),
+                self.coordinator.set_mqtt_work_state("SN1", {"w_mode_app_name": "SMOOTHING"}),
+            ]
+
+            for index in order:
+                self.coordinator.restore_mqtt_work_state("SN1", guesses[index])
+            with self.subTest(order=order):
+                self.assertEqual(self.state()["w_mode_app_name"], "IDLE")
+
+
 class RefusedLoginTests(unittest.TestCase):
     def test_refused_login_asks_for_reauth_and_stops_mqtt_polls(self):
         import asyncio

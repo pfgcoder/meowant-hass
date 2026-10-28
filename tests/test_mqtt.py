@@ -139,6 +139,35 @@ class MqttCodecUnitTests(unittest.TestCase):
         self.assertEqual(decoded["w_mode"], 0)
         self.assertEqual(decoded["w_state_app_name"], "BLOCKED")
 
+    def test_other_idle_states_read_as_pending(self):
+        # w_state 3 (paused) and an unknown 4 in idle mode: nothing to resume, so ready to start.
+        for body in ("1003", "1004"):
+            with self.subTest(body=body):
+                self.assertEqual(mqtt.summarize_all_state_body(bytes.fromhex(body))["w_state_app_name"], "PENDING")
+
+        # Paused while cleaning keeps its name, so the resume button works.
+        self.assertEqual(mqtt.summarize_all_state_body(bytes.fromhex("08021003"))["w_state_app_name"], "PAUSED")
+
+    def test_refused_connect_is_a_connect_error(self):
+        class RefusingConnection(FakeConnection):
+            def sendall(self, packet: bytes) -> None:
+                self.sent.append(parse_packet(packet))
+                # CONNACK with return code 5: not authorised.
+                self.buffer += mqtt.mqtt_packet(0x20, b"\x00\x05")
+
+        conn = RefusingConnection()
+        with self.assertRaises(mqtt.MqttConnectError):
+            mqtt.publish_service_on_connection(
+                conn,
+                credentials={"clientId": "c", "mqttUserName": "u", "mqttPassword": "p", "pubTopic": "pub", "subTopic": "sub"},
+                target_uid="717401",
+                from_uid="717422",
+                service_id="request_state",
+                seq=None,
+                timeout=1,
+            )
+        self.assertEqual(len(conn.sent), 1)
+
     def test_collect_stops_at_the_awaited_reply(self):
         conn = FakeConnection()
         for packet_id in (9, 10):

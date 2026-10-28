@@ -50,6 +50,17 @@ class UrlopenRecorder:
         return [json.loads(req.data.decode("utf-8")) if req.data else None for req in self.requests]
 
 
+class FakeParts:
+    """publish_service's result, by default with the box's reply to the request."""
+
+    def __init__(self, reply: bool = True):
+        self.reply = reply
+
+    def as_dict(self):
+        messages = [{"decoded": {"risp_cmd": 1021, "from_uid": "device-uid"}}] if self.reply else []
+        return {"seq": 7, "received_messages": messages}
+
+
 class ApiUnitTests(unittest.TestCase):
     def make_client(self, account="user@example.com", password="secret", area_code=""):
         return api.UbpetClient(
@@ -849,23 +860,66 @@ class ApiUnitTests(unittest.TestCase):
         client.get_im_credentials = get_im_credentials
         client.get_im_friends = get_im_friends
 
-        class FakeParts:
-            def as_dict(self):
-                return {"seq": 7}
-
         with patch.object(api, "publish_service", return_value=FakeParts()) as publish:
             client.send_mqtt_service("SN123", "request_state")
             client.send_mqtt_service("SN123", "request_state")
         self.assertEqual(calls, {"credentials": 1, "friends": 1})
         self.assertTrue(publish.call_args.kwargs["stop_on_state_reply"])
 
-        with patch.object(api, "publish_service", side_effect=RuntimeError("MQTT CONNECT failed")):
+        with patch.object(api, "publish_service", side_effect=RuntimeError("MQTT socket closed")):
             with self.assertRaises(RuntimeError):
                 client.send_mqtt_service("SN123", "request_state")
         with patch.object(api, "publish_service", return_value=FakeParts()) as publish:
             client.send_mqtt_service("SN123", "start_clean_up")
         self.assertEqual(calls, {"credentials": 2, "friends": 2})
         self.assertFalse(publish.call_args.kwargs["stop_on_state_reply"])
+
+    def test_refused_mqtt_connect_logs_in_to_im_again_and_retries_once(self):
+        client, calls = self.make_im_client()
+        sent = []
+
+        def refuse_first(**kwargs):
+            sent.append(kwargs["service_id"])
+            if len(sent) == 1:
+                raise api.MqttConnectError("MQTT CONNECT failed")
+            return FakeParts()
+
+        with patch.object(api, "publish_service", side_effect=refuse_first):
+            client.send_mqtt_service("SN123", "start_clean_up")
+        self.assertEqual(sent, ["start_clean_up", "start_clean_up"])
+        self.assertEqual(calls, {"credentials": 2, "friends": 2})
+
+        # Only once: a second refusal reaches the caller.
+        with patch.object(api, "publish_service", side_effect=api.MqttConnectError("MQTT CONNECT failed")) as publish:
+            with self.assertRaises(api.MqttConnectError):
+                client.send_mqtt_service("SN123", "start_clean_up")
+        self.assertEqual(publish.call_count, 2)
+
+    def test_state_request_without_a_reply_looks_up_the_contact_again(self):
+        client, calls = self.make_im_client()
+
+        with patch.object(api, "publish_service", return_value=FakeParts(reply=False)):
+            client.send_mqtt_service("SN123", "request_state")
+        with patch.object(api, "publish_service", return_value=FakeParts()):
+            client.send_mqtt_service("SN123", "request_state")
+            client.send_mqtt_service("SN123", "request_state")
+        self.assertEqual(calls, {"credentials": 1, "friends": 2})
+
+    def make_im_client(self):
+        client = self.make_client()
+        calls = {"credentials": 0, "friends": 0}
+
+        def get_im_credentials():
+            calls["credentials"] += 1
+            return {"pubTopic": "pub/topic", "uid": "account-uid"}
+
+        def get_im_friends():
+            calls["friends"] += 1
+            return [{"userName": "SN123", "userId": "device-uid"}]
+
+        client.get_im_credentials = get_im_credentials
+        client.get_im_friends = get_im_friends
+        return client, calls
 
 
 def load_diagnostics_module():

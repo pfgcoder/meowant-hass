@@ -186,7 +186,7 @@ class UbpetMqttCommandButton(CoordinatorEntity[UbpetDataUpdateCoordinator], Butt
         if self.entity_description.service_id not in DIAGNOSTIC_SERVICES:
             optimistic_state = _optimistic_mqtt_state_for_service(self.entity_description.service_id)
         if optimistic_state:
-            previous_state = self.coordinator.set_mqtt_work_state(self._serial, optimistic_state)
+            guessed_state = self.coordinator.set_mqtt_work_state(self._serial, optimistic_state)
         try:
             result = await self.hass.async_add_executor_job(
                 self.coordinator.client.send_mqtt_service,
@@ -194,9 +194,12 @@ class UbpetMqttCommandButton(CoordinatorEntity[UbpetDataUpdateCoordinator], Butt
                 self.entity_description.service_id,
             )
         except Exception:
-            # The command didn't go out, so stop showing the state it would have caused.
+            # The send can fail after the command went out (the socket closing while we listen),
+            # so stop showing the guess and ask the box for its real state straight away.
             if optimistic_state:
-                self.coordinator.restore_mqtt_work_state(self._serial, previous_state)
+                self.coordinator.restore_mqtt_work_state(self._serial, guessed_state)
+            if self.entity_description.service_id not in DIAGNOSTIC_SERVICES:
+                self.coordinator.start_mqtt_state_poll(self._serial, fast=True)
             raise
         _LOGGER.info(
             "Sent UPET MQTT service=%s serial=%s seq=%s cid=%s received=%s",

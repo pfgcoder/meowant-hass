@@ -37,6 +37,8 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.client = client
         self._mqtt_state_by_serial: dict[str, dict[str, Any]] = {}
+        # The box's last actual reply, which a button press's guess goes back to if the send fails.
+        self._mqtt_reply_by_serial: dict[str, dict[str, Any]] = {}
         self._mqtt_state_poll_task: asyncio.Task[None] | None = None
         self._mqtt_state_request_started_at_by_serial: dict[str, datetime] = {}
         self._mqtt_state_polls_enabled = False
@@ -84,6 +86,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if state is None:
             return False
         self._mqtt_state_by_serial[serial] = state
+        self._mqtt_reply_by_serial[serial] = state
         self._last_mqtt_update_at_by_serial[serial] = datetime.now(UTC)
         self._update_runtime_data()
         return True
@@ -95,23 +98,28 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def last_mqtt_update_at(self, serial: str) -> datetime | None:
         return self._last_mqtt_update_at_by_serial.get(serial)
 
-    def set_mqtt_work_state(self, serial: str, state: dict[str, Any]) -> dict[str, Any] | None:
-        """Show a guessed state until the box replies; returns the state it replaced."""
-        previous = self._mqtt_state_by_serial.get(serial)
-        mqtt_state = deepcopy(previous or {})
+    def set_mqtt_work_state(self, serial: str, state: dict[str, Any]) -> dict[str, Any]:
+        """Show a guessed state until the box replies; returns the guess."""
+        mqtt_state = deepcopy(self._mqtt_state_by_serial.get(serial) or {})
         mqtt_state.update(state)
         mqtt_state["optimistic"] = True
         mqtt_state["optimistic_updated_at"] = time.time()
         self._mqtt_state_by_serial[serial] = mqtt_state
         self._update_runtime_data()
-        return previous
+        return mqtt_state
 
-    def restore_mqtt_work_state(self, serial: str, previous: dict[str, Any] | None) -> None:
-        """Undo set_mqtt_work_state when the command it guessed for wasn't sent."""
-        if previous is None:
+    def restore_mqtt_work_state(self, serial: str, guess: dict[str, Any]) -> None:
+        """Undo set_mqtt_work_state after a failed send, going back to the box's last reply.
+
+        A reply or a newer guess that replaced this one stays. Restoring the last reply rather than
+        whatever the guess replaced keeps one failed press from bringing back another's guess.
+        """
+        if self._mqtt_state_by_serial.get(serial) is not guess:
+            return
+        if (reply := self._mqtt_reply_by_serial.get(serial)) is None:
             self._mqtt_state_by_serial.pop(serial, None)
         else:
-            self._mqtt_state_by_serial[serial] = previous
+            self._mqtt_state_by_serial[serial] = reply
         self._update_runtime_data()
 
     def _update_runtime_data(self) -> None:
@@ -226,6 +234,9 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             item = dict(item)
             if state := self._mqtt_state_by_serial.get(serial):
                 item["mqtt_state"] = deepcopy(state)
+            else:
+                # Also clears a guess that was undone before the box ever replied.
+                item.pop("mqtt_state", None)
             item["runtime_state"] = {
                 "last_rest_update_at": self._last_rest_update_at,
                 "last_mqtt_update_at": self._last_mqtt_update_at_by_serial.get(serial),

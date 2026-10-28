@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 
 try:
-    from .mqtt import mqtt_endpoint, publish_service
+    from .mqtt import MqttConnectError, mqtt_endpoint, publish_service
 except ImportError:
     _MQTT_PATH = Path(__file__).with_name("mqtt.py")
     _mqtt_spec = importlib.util.spec_from_file_location("ubpet_mqtt", _MQTT_PATH)
@@ -27,6 +27,7 @@ except ImportError:
     _mqtt_spec.loader.exec_module(_mqtt)
     publish_service = _mqtt.publish_service
     mqtt_endpoint = _mqtt.mqtt_endpoint
+    MqttConnectError = _mqtt.MqttConnectError
 
 USER_AGENT = "CatLitterBoxOverseasEu/2.1.12 (com.ubtrobot.airpet.overseaseu; build:699; iOS 26.5.0) Alamofire/5.5.0"
 NONCE_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -103,6 +104,8 @@ class UbpetClient:
         self._auth_lock = threading.Lock()
         # The IM login (MQTT credentials and our sender uid) and each box's IM contact, reused
         # between MQTT sends instead of fetched over REST every time; dropped when a send fails.
+        # Polls for several boxes and button presses run in different threads, hence the lock.
+        self._im_lock = threading.Lock()
         self._im_session: tuple[dict[str, Any], str] | None = None
         self._im_contacts: dict[str, dict[str, Any]] = {}
 
@@ -240,6 +243,15 @@ class UbpetClient:
         return _require_list(data)
 
     def send_mqtt_service(self, serial_number: str, service_id: str) -> dict[str, Any]:
+        try:
+            return self._send_mqtt_service_once(serial_number, service_id)
+        except MqttConnectError as err:
+            # Most likely the reused IM login expired. Nothing was published, so a retry with a
+            # fresh login can't send the command twice.
+            _LOGGER.info("UPET MQTT %s for %s; logging in to IM again and retrying once", err, serial_number)
+            return self._send_mqtt_service_once(serial_number, service_id)
+
+    def _send_mqtt_service_once(self, serial_number: str, service_id: str) -> dict[str, Any]:
         credentials, from_uid, contact = self._im_session_for(serial_number)
         publish_credentials, publish_sources = _mqtt_publish_credentials(credentials)
         target_uid = str(contact["userId"])
@@ -257,7 +269,8 @@ class UbpetClient:
             )
         except (OSError, RuntimeError):
             # The reused IM login may have expired; the next send fetches a fresh one.
-            self._im_session = None
+            with self._im_lock:
+                self._im_session = None
             raise
         result = parts.as_dict()
         result["from_uid"] = from_uid
@@ -274,17 +287,23 @@ class UbpetClient:
         result["publish_url_source"] = publish_sources["url"]
         result["matched_contact"] = _safe_contact_summary(contact)
         result.update(_summarize_mqtt_result(result, target_uid=target_uid))
+        if service_id == "request_state" and result["target_reply_status"] != "observed":
+            # The box always answers a state request when it's online. Its IM contact may have
+            # changed (the box was paired again), so look it up afresh next time.
+            with self._im_lock:
+                self._im_contacts.pop(serial_number, None)
         return result
 
     def _im_session_for(self, serial_number: str) -> tuple[dict[str, Any], str, dict[str, Any]]:
-        if self._im_session is None:
-            credentials = self.get_im_credentials()
-            self._im_session = (credentials, _find_account_uid(credentials, self.auth))
-            self._im_contacts = {}
-        if serial_number not in self._im_contacts:
-            self._im_contacts[serial_number] = _find_im_contact(self.get_im_friends(), serial_number)
-        credentials, from_uid = self._im_session
-        return credentials, from_uid, self._im_contacts[serial_number]
+        with self._im_lock:
+            if self._im_session is None:
+                credentials = self.get_im_credentials()
+                self._im_session = (credentials, _find_account_uid(credentials, self.auth))
+                self._im_contacts = {}
+            if serial_number not in self._im_contacts:
+                self._im_contacts[serial_number] = _find_im_contact(self.get_im_friends(), serial_number)
+            credentials, from_uid = self._im_session
+            return credentials, from_uid, self._im_contacts[serial_number]
 
     def get_cats(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/catbox-server/web/cat/info", auth=True)

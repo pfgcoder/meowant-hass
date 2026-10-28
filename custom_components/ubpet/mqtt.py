@@ -104,6 +104,10 @@ WORK_ACTION_TO_OP_STATE = {
 }
 
 
+class MqttConnectError(RuntimeError):
+    """The broker turned down the connection or subscription, before anything was published."""
+
+
 @dataclass(frozen=True, slots=True)
 class PayloadParts:
     op_body: bytes
@@ -486,12 +490,12 @@ def publish_service_on_connection(
     conn.sendall(mqtt_packet(0x10, mqtt_connect_payload(client_id=client_id, username=username, password=password)))
     connack = read_mqtt_packet(conn, timeout)
     if connack is None or connack[0] != 2 or connack[2] != b"\x00\x00":
-        raise RuntimeError("MQTT CONNECT failed")
+        raise MqttConnectError("MQTT CONNECT failed")
 
     conn.sendall(mqtt_packet(0x82, mqtt_subscribe_payload(packet_id=1, topic=sub_topic, qos=1)))
     suback = read_mqtt_packet(conn, timeout)
     if suback is None or suback[0] != 9:
-        raise RuntimeError("MQTT SUBSCRIBE failed")
+        raise MqttConnectError("MQTT SUBSCRIBE failed")
 
     parts = resolve_service_payload(
         service_id,
@@ -743,11 +747,11 @@ def summarize_all_state_body(body: bytes) -> dict[str, Any]:
         summary["w_mode_app_name"] = WORK_MODE_APP_NAMES.get(w_mode, f"UNKNOWN_{w_mode}")
     if isinstance(w_state, int):
         summary["w_state_name"] = WORK_STATE_NAMES.get(w_state, f"unknown_{w_state}")
-        # Some SC-01 firmware reports IDLE + RUNNING when it is ready. Treat that
-        # as PENDING so start controls remain available. Other idle states (a cat
-        # in the box shows as BLOCKED) keep their own name.
+        # Some SC-01 firmware reports IDLE + RUNNING when it is ready. An idle box
+        # reads as PENDING whatever its state, so start controls remain available;
+        # only BLOCKED (a cat in the box) keeps its own name.
         summary["w_state_app_name"] = (
-            "PENDING" if w_mode == 0 and w_state == 1 else WORK_STATE_APP_NAMES.get(w_state, f"UNKNOWN_{w_state}")
+            "PENDING" if w_mode == 0 and w_state != 2 else WORK_STATE_APP_NAMES.get(w_state, f"UNKNOWN_{w_state}")
         )
     return summary
 
