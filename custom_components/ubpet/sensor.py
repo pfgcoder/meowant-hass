@@ -299,10 +299,10 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
         if not item:
             return None
         if self.entity_description.key == "last_used_by":
-            return self._latest_visit(item).get("catNickname")
+            return self._remembered_visit(item).get("catNickname")
         return self.entity_description.value_fn(item)
 
-    def _latest_visit(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _remembered_visit(self, item: dict[str, Any]) -> dict[str, Any]:
         """The newest matched visit, or the last one seen when the records hold none (all weights the
         box couldn't match), so the cat doesn't go to unknown and back."""
         if visit := _latest_visit(item):
@@ -332,7 +332,7 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
         if self.entity_description.key == "last_visit":
             return _last_visit_attributes(item)
         if self.entity_description.key == "last_used_by":
-            visit = self._latest_visit(item)
+            visit = self._remembered_visit(item)
             return _visit_summary(visit) if visit else {}
         if self.entity_description.key.startswith("mqtt_"):
             mqtt_state = item.get("mqtt_state")
