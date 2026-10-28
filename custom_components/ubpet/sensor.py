@@ -80,6 +80,13 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         value_fn=lambda item: _milliseconds_to_datetime(_latest_cat_record(item).get("eventTime")),
     ),
     UbpetSensorDescription(
+        key="last_used_by",
+        name="Last used by",
+        icon="mdi:cat",
+        translation_key="last_used_by",
+        value_fn=lambda item: _latest_visit(item).get("catNickname"),
+    ),
+    UbpetSensorDescription(
         key="visits_today",
         name="Visits today",
         icon="mdi:counter",
@@ -338,6 +345,9 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
             }
         if self.entity_description.key == "last_visit":
             return _last_visit_attributes(item)
+        if self.entity_description.key == "last_used_by":
+            visit = _latest_visit(item)
+            return _visit_summary(visit) if visit else {}
         if self.entity_description.key.startswith("mqtt_"):
             mqtt_state = item.get("mqtt_state")
             if not isinstance(mqtt_state, dict):
@@ -531,6 +541,11 @@ def _records_newest_first(records: Any) -> list[dict[str, Any]]:
 def _latest_cat_record(item: dict[str, Any]) -> dict[str, Any]:
     records = _cat_records(item)
     return records[0] if records else {}
+
+
+def _latest_visit(item: dict[str, Any]) -> dict[str, Any]:
+    """Return the newest visit matched to a cat, passing over weights the box couldn't match."""
+    return next((record for record in _cat_records(item) if record.get("eventType") == VISIT_EVENT), {})
 
 
 def _last_visit_attributes(item: dict[str, Any]) -> dict[str, Any]:

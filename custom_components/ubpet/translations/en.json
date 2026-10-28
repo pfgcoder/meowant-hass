@@ -61,6 +61,9 @@
       "last_visit": {
         "name": "Last visit"
       },
+      "last_used_by": {
+        "name": "Last used by"
+      },
       "visits_today": {
         "name": "Visits today"
       },
