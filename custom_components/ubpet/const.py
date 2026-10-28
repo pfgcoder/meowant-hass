@@ -4,6 +4,8 @@ from datetime import timedelta
 
 from homeassistant.const import Platform
 
+from .profiles import UPET_BASE_URL
+
 DOMAIN = "ubpet"
 DEFAULT_SCAN_INTERVAL = timedelta(minutes=3)
 
@@ -29,9 +31,10 @@ CONF_PROFILE = "profile"
 # Option: how many of each box's latest visit and clean records each update fetches.
 CONF_RECORDS_PER_FETCH = "records_per_fetch"
 
-EU_BASE_URL = "https://apis-eu.airrobo-home.com"
+# Plain here and in profiles.py rather than in the secrets bundle, so a change to where logins go
+# shows in a diff. The EU host is UPET's, defined once in profiles.py.
+EU_BASE_URL = UPET_BASE_URL
 RUSSIA_BASE_URL = "https://apis-ru.airrobo-home.com"
-# Plain here rather than in the secrets bundle, so a change to where logins go shows in a diff.
 DEFAULT_BASE_URL = EU_BASE_URL
 
 # Countries returned by the UPET 2.1.14 region map for the European app.

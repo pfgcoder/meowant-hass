@@ -14,6 +14,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .box_config import empty_waste_bin_reminder_config
 from .const import DOMAIN
 from .coordinator import UbpetDataUpdateCoordinator
 from .mqtt import STATE_FIELD_NAMES
@@ -467,7 +468,7 @@ def _box_status_from_mqtt(item: dict[str, Any]) -> str | None:
 
 
 def _empty_waste_bin_reminder_days(config: dict[str, Any]) -> str | None:
-    reminder = _empty_waste_bin_reminder_config(config)
+    reminder = empty_waste_bin_reminder_config(config)
     if reminder is None:
         return None
     try:
@@ -490,13 +491,6 @@ def _empty_waste_bin_reminder_days(config: dict[str, Any]) -> str | None:
     if len(days) == 7:
         return "Every day"
     return ", ".join(days) if days else "Off"
-
-
-def _empty_waste_bin_reminder_config(config: dict[str, Any]) -> dict[str, Any] | None:
-    for item in config.get("notifyConfigList") or []:
-        if isinstance(item, dict) and item.get("type") == 4 and item.get("notifyConfigId") is not None:
-            return item
-    return None
 
 
 def _cat_records(item: dict[str, Any]) -> list[dict[str, Any]]:

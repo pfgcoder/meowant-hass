@@ -334,15 +334,10 @@ class UbpetClient:
         if minutes < 1:
             raise ValueError("auto clean delay must be at least 1 minute")
         # The delay and the auto clean switch are one setting, so send the switch as it is.
-        payload = {
-            "serialNumber": serial_number,
-            "functionType": 2,
-            "controlSwitch": 1 if enabled else 0,
-            "optionInt": minutes * 60,
-        }
-        self._request("PUT", "/catbox-server/box/config/switch/update", payload=payload, auth=True)
+        self.set_auto_clean_enabled(serial_number, enabled, minutes * 60)
 
     def set_auto_clean_enabled(self, serial_number: str, enabled: bool, lazy_time_seconds: int | None) -> None:
+        """Set auto clean and its delay, one setting on the box (the delay defaults to 8 minutes)."""
         payload = {
             "serialNumber": serial_number,
             "functionType": 2,

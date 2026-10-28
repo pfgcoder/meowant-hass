@@ -25,7 +25,10 @@ def _load_const_module():
     homeassistant_module = types.ModuleType("homeassistant")
     homeassistant_const_module = types.ModuleType("homeassistant.const")
     homeassistant_const_module.Platform = _Platform
-    spec = importlib.util.spec_from_file_location("ubpet_const_test", CONST_PATH)
+    # A package around const.py, for its imports of profiles.py and secrets.py.
+    package = types.ModuleType("ubpet_const_test")
+    package.__path__ = [str(CONST_PATH.parent)]
+    spec = importlib.util.spec_from_file_location("ubpet_const_test.const", CONST_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     with patch.dict(
@@ -33,6 +36,7 @@ def _load_const_module():
         {
             "homeassistant": homeassistant_module,
             "homeassistant.const": homeassistant_const_module,
+            "ubpet_const_test": package,
         },
     ):
         spec.loader.exec_module(module)

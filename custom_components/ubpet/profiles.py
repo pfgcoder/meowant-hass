@@ -10,7 +10,7 @@ except ImportError:
 
 # Where each app logs in. Plain constants rather than in the secrets bundle, so a change to where
 # the account and password hash are sent shows in a diff. This module stays free of Home Assistant
-# imports, so it can't use const.py (EU_BASE_URL there is the same host as UPET_BASE_URL).
+# imports; const.py takes its EU_BASE_URL from UPET_BASE_URL here.
 UPET_BASE_URL = "https://apis-eu.airrobo-home.com"
 MEOWANT_BASE_URL = "https://apis.airrobo-home.com"
 

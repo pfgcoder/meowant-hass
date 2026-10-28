@@ -171,6 +171,19 @@ class TodayCountTests(unittest.TestCase):
         self.assertFalse(sensor._is_cats_record(_visit(None, MIDNIGHT), {"catInfoId": None, "nickname": None}))
 
 
+class WasteBinReminderTests(unittest.TestCase):
+    def test_reminder_days_come_from_the_type_4_notification(self):
+        def days(notify_configs):
+            return _device_sensor("empty_waste_bin_reminder_days", {"config": {"notifyConfigList": notify_configs}}).native_value
+
+        self.assertEqual(days([{"type": 4, "notifyConfigId": 1, "period": 127}]), "Every day")
+        self.assertEqual(days([{"type": 3, "notifyConfigId": 1, "period": 1}, {"type": 4, "notifyConfigId": 2, "period": 5}]), "Monday, Wednesday")
+        self.assertEqual(days([{"type": 4, "notifyConfigId": 1, "period": 0}]), "Off")
+        # Without an ID the reminder can't be changed, so it doesn't count as set up.
+        self.assertIsNone(days([{"type": 4, "period": 127}]))
+        self.assertIsNone(days(None))
+
+
 class AttributeTests(unittest.TestCase):
     def test_mqtt_sensors_show_only_state_fields_that_hold_still(self):
         item = {
