@@ -835,22 +835,32 @@ class ApiUnitTests(unittest.TestCase):
                 client.login()
             self.assertNotIsInstance(caught.exception, api.UbpetAuthError)
 
-    def test_refused_login_during_the_optional_calls_fails_the_dashboard(self):
+    def test_failed_login_during_the_optional_calls_fails_the_dashboard(self):
+        # Refused, or failing for another reason such as a rate limit after a token was rejected.
+        for error in (api.UbpetAuthError(200, {"code": 2004}), api.UbpetLoginError(429, {"code": 429})):
+            client = self.make_client()
+            client.auth = api.UbpetAuth(token="token", refresh_token=None, expires_at_ms=9999999999999, user_id=1)
+            client.get_devices = lambda: [{"serialNumber": "SN123"}]
+            calls = []
+
+            def failed(*args, error=error):
+                calls.append(args)
+                raise error
+
+            client.get_all_config = failed
+            client.get_box_use_times = failed
+
+            with self.subTest(error=error), self.assertRaises(type(error)):
+                client.get_dashboard()
+            self.assertEqual(len(calls), 1)
+
+    def test_login_that_may_pass_fails_as_a_login_error(self):
         client = self.make_client()
-        client.auth = api.UbpetAuth(token="token", refresh_token=None, expires_at_ms=9999999999999, user_id=1)
-        client.get_devices = lambda: [{"serialNumber": "SN123"}]
-        calls = []
+        client._login_with_account_type = lambda account_type: (_ for _ in ()).throw(api.UbpetApiError(429, {"code": 429}))
 
-        def refused(*args):
-            calls.append(args)
-            raise api.UbpetAuthError(200, {"code": 2004})
-
-        client.get_all_config = refused
-        client.get_box_use_times = refused
-
-        with self.assertRaises(api.UbpetAuthError):
-            client.get_dashboard()
-        self.assertEqual(len(calls), 1)
+        with self.assertRaises(api.UbpetLoginError) as caught:
+            client.login()
+        self.assertEqual(caught.exception.status, 429)
 
     def test_box_records_with_null_data_fail_as_an_api_error(self):
         client = self.make_client()

@@ -66,7 +66,11 @@ class UbpetApiError(RuntimeError):
         super().__init__(f"UPET API error status={status} code={code} message={message}")
 
 
-class UbpetAuthError(UbpetApiError):
+class UbpetLoginError(UbpetApiError):
+    """Logging in failed, so every other call that needs a login would fail the same way."""
+
+
+class UbpetAuthError(UbpetLoginError):
     """The server refused the login itself (account or password), rather than being unreachable."""
 
 
@@ -174,7 +178,7 @@ class UbpetClient:
                 # No account type found the account, so retrying can't help either.
                 raise UbpetAuthError(last_error.status, last_error.payload) from last_error
             # Anything else (a busy server, an HTTP error, a reply without a token) may pass.
-            raise last_error
+            raise UbpetLoginError(last_error.status, last_error.payload) from last_error
         raise RuntimeError("no account type candidates")
 
     def _refresh_after_unauthorized(self, rejected_token: str) -> UbpetAuth:
@@ -641,9 +645,9 @@ def _summarize_mqtt_result(result: dict[str, Any], *, target_uid: str) -> dict[s
 def _safe_dict_call(func, *args) -> dict[str, Any]:
     try:
         return func(*args)
-    except UbpetAuthError:
-        # A refused login fails the whole update; swallowing it would retry the login on each
-        # remaining call.
+    except UbpetLoginError:
+        # A failed login fails the whole update; swallowing it would log in again on each
+        # remaining call, about 20 logins for one update.
         raise
     except (OSError, RuntimeError, UbpetApiError) as err:
         _LOGGER.debug("UPET optional endpoint failed: %s", err)
@@ -659,7 +663,7 @@ def _optional_list_call(func, *args) -> list[dict[str, Any]] | None:
     """Like _safe_list_call, but None when the call failed rather than returned nothing."""
     try:
         return func(*args)
-    except UbpetAuthError:
+    except UbpetLoginError:
         raise
     except (OSError, RuntimeError, UbpetApiError) as err:
         _LOGGER.debug("UPET optional endpoint failed: %s", err)
