@@ -23,8 +23,6 @@ MQTT_STATE_RUNNING_POLL_SECONDS = 5
 MQTT_STATE_PAUSED_POLL_SECONDS = 10
 MQTT_STATE_PENDING_POLL_SECONDS = 60
 MQTT_STATE_POLL_HEARTBEAT_SECONDS = 1
-MQTT_STATE_REQUEST_TIMEOUT_SECONDS = 30
-MQTT_STATE_IN_PROGRESS_STALE_SECONDS = 45
 # The parts get_dashboard reads besides each box's device entry, per box and for the account, with
 # what each reads as empty. A part whose call failed comes back as None: the update shows its last
 # values for up to KEEP_FAILED_PART_MINUTES, then (or with nothing to keep) an empty one, which the
@@ -55,10 +53,13 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # The box's last actual reply, which a button press's guess goes back to if the send fails.
         self._mqtt_reply_by_serial: dict[str, dict[str, Any]] = {}
         self._mqtt_state_poll_task: asyncio.Task[None] | None = None
-        self._mqtt_state_request_started_at_by_serial: dict[str, datetime] = {}
+        # Boxes with a state request still running. A box's next one waits for it to end.
+        self._mqtt_state_requests_in_progress: set[str] = set()
         self._mqtt_state_polls_enabled = False
         # Set when a refused login stopped the polls, so the next update that logs in restarts them.
         self._mqtt_state_polls_paused_for_auth = False
+        # Set for good when the entry unloads or Home Assistant stops.
+        self._mqtt_state_polls_cancelled = False
         self._last_rest_update_at: datetime | None = None
         self._last_mqtt_update_at_by_serial: dict[str, datetime] = {}
         self._next_mqtt_poll_at_by_serial: dict[str, datetime] = {}
@@ -194,23 +195,31 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._ensure_mqtt_state_poll_task()
 
     def enable_mqtt_state_polls(self) -> None:
+        if self._mqtt_state_polls_cancelled:
+            return
         self._mqtt_state_polls_enabled = True
         self._ensure_mqtt_state_poll_task()
         self._ensure_mqtt_state_polls(self.data or {})
 
     def _pause_mqtt_state_polls_for_auth(self) -> None:
-        self.cancel_mqtt_state_polls()
+        if self._mqtt_state_polls_cancelled:
+            # A poll or update still running when the entry unloaded mustn't set up a restart.
+            return
+        self._stop_mqtt_state_poll_loop()
         self._mqtt_state_polls_paused_for_auth = True
 
     def cancel_mqtt_state_polls(self) -> None:
-        self._mqtt_state_polls_enabled = False
-        # So an update still in flight when the entry unloads can't restart the polls.
+        """Stop the polls for good: the entry is unloading or Home Assistant is stopping."""
+        self._mqtt_state_polls_cancelled = True
         self._mqtt_state_polls_paused_for_auth = False
+        self._stop_mqtt_state_poll_loop()
+
+    def _stop_mqtt_state_poll_loop(self) -> None:
+        self._mqtt_state_polls_enabled = False
         if self._mqtt_state_poll_task is not None:
             self._mqtt_state_poll_task.cancel()
             self._mqtt_state_poll_task = None
         self._next_mqtt_poll_at_by_serial.clear()
-        self._mqtt_state_request_started_at_by_serial.clear()
 
     def _ensure_mqtt_state_poll_task(self) -> None:
         if self._mqtt_state_poll_task is None or self._mqtt_state_poll_task.done():
@@ -238,15 +247,18 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.info("Stopped UPET MQTT state poll loop")
 
     async def async_request_mqtt_state(self, serial: str) -> None:
-        if serial in self._mqtt_state_request_started_at_by_serial and not self._mqtt_state_request_is_stale(serial):
+        if serial in self._mqtt_state_requests_in_progress:
             _LOGGER.debug("UPET MQTT state request already in progress for %s", serial)
             return
         self._next_mqtt_poll_at_by_serial.pop(serial, None)
-        self._mqtt_state_request_started_at_by_serial[serial] = datetime.now(UTC)
+        self._mqtt_state_requests_in_progress.add(serial)
         _LOGGER.info("Requesting UPET MQTT state for %s", serial)
         try:
-            async with asyncio.timeout(MQTT_STATE_REQUEST_TIMEOUT_SECONDS):
-                result = await self.hass.async_add_executor_job(self.client.send_mqtt_service, serial, "request_state")
+            # No timeout of our own: Home Assistant would stop waiting, but the send's thread would
+            # carry on, and the polls after it would queue for the client's MQTT lock, each holding
+            # one of Home Assistant's shared worker threads. Every network step of a send has its
+            # own timeout, so it ends anyway.
+            result = await self.hass.async_add_executor_job(self.client.send_mqtt_service, serial, "request_state")
             if isinstance(result, dict):
                 result.setdefault("service_id", "request_state")
             updated = self.store_mqtt_result(serial, result)
@@ -262,8 +274,6 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _mqtt_work_mode(item),
                 result.get("received_count") if isinstance(result, dict) else None,
             )
-        except TimeoutError:
-            self._mqtt_poll_failed(serial, f"timed out after {MQTT_STATE_REQUEST_TIMEOUT_SECONDS}s")
         except UbpetAuthError as err:
             # Stop polling with a refused password. The next data update either logs in, which
             # restarts the polls, or starts the reauth.
@@ -274,7 +284,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             _LOGGER.exception("Unexpected UPET MQTT state poll failure for %s", serial)
         finally:
-            self._mqtt_state_request_started_at_by_serial.pop(serial, None)
+            self._mqtt_state_requests_in_progress.discard(serial)
             self._schedule_next_mqtt_state_poll(serial)
 
     def _mqtt_poll_failed(self, serial: str, reason: str) -> None:
@@ -330,11 +340,8 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         now = datetime.now(UTC)
         for serial in devices:
-            if serial in self._mqtt_state_request_started_at_by_serial:
-                if self._mqtt_state_request_is_stale(serial):
-                    self._mqtt_state_request_started_at_by_serial.pop(serial, None)
-                else:
-                    continue
+            if serial in self._mqtt_state_requests_in_progress:
+                continue
             due_at = self._next_mqtt_poll_at_by_serial.get(serial)
             if due_at is not None and due_at > now:
                 continue
@@ -348,21 +355,6 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if state == "PAUSED":
             return MQTT_STATE_PAUSED_POLL_SECONDS
         return MQTT_STATE_PENDING_POLL_SECONDS
-
-    def _mqtt_state_request_is_stale(self, serial: str) -> bool:
-        started_at = self._mqtt_state_request_started_at_by_serial.get(serial)
-        if started_at is None:
-            return True
-        age = (datetime.now(UTC) - started_at).total_seconds()
-        if age <= MQTT_STATE_IN_PROGRESS_STALE_SECONDS:
-            return False
-        _LOGGER.warning(
-            "UPET MQTT state request for %s is stale in_progress: age=%.1fs stale_after=%ss",
-            serial,
-            age,
-            MQTT_STATE_IN_PROGRESS_STALE_SECONDS,
-        )
-        return True
 
 
 def _latest_mqtt_state(result: dict[str, Any] | object) -> dict[str, Any] | None:

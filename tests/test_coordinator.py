@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 import importlib.util
 from pathlib import Path
 import sys
@@ -269,15 +269,16 @@ class RefusedLoginTests(unittest.TestCase):
         async def run_in_executor(func, *args):
             return func(*args)
 
-        coordinator = object.__new__(coordinator_module.UbpetDataUpdateCoordinator)
-        coordinator.hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
-        coordinator.client = types.SimpleNamespace(get_dashboard=get_dashboard)
-        cancelled = []
-        coordinator.cancel_mqtt_state_polls = lambda: cancelled.append(True)
+        coordinator = coordinator_module.UbpetDataUpdateCoordinator(
+            types.SimpleNamespace(async_add_executor_job=run_in_executor),
+            types.SimpleNamespace(get_dashboard=get_dashboard),
+        )
+        coordinator._mqtt_state_polls_enabled = True
 
         with self.assertRaises(auth_failed):
             asyncio.run(coordinator._async_update_data())
-        self.assertEqual(cancelled, [True])
+        self.assertFalse(coordinator._mqtt_state_polls_enabled)
+        self.assertTrue(coordinator._mqtt_state_polls_paused_for_auth)
 
     def test_polls_stopped_by_a_refused_login_restart_when_login_works_again(self):
         import asyncio
@@ -297,13 +298,14 @@ class RefusedLoginTests(unittest.TestCase):
         hass = types.SimpleNamespace(async_add_executor_job=run_in_executor, async_create_task=create_task)
         client = types.SimpleNamespace(
             send_mqtt_service=refused,
-            get_dashboard=lambda: {"devices": {"SN1": {"device": {}}}, "cats": []},
+            get_dashboard=lambda: {"devices": {"SN1": _loaded_box()}, "cats": []},
         )
         coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, client)
         coordinator.data = {"devices": {"SN1": {}}}
         coordinator._mqtt_state_polls_enabled = True
 
-        asyncio.run(coordinator.async_request_mqtt_state("SN1"))
+        with self.assertLogs(coordinator_module._LOGGER, "WARNING"):
+            asyncio.run(coordinator.async_request_mqtt_state("SN1"))
         self.assertFalse(coordinator._mqtt_state_polls_enabled)
 
         asyncio.run(coordinator._async_update_data())
@@ -330,6 +332,75 @@ class RefusedLoginTests(unittest.TestCase):
         asyncio.run(coordinator._async_update_data())
 
         self.assertFalse(coordinator._mqtt_state_polls_enabled)
+
+    def test_a_poll_refused_after_unload_leaves_the_polls_stopped(self):
+        import asyncio
+
+        coordinator_module = load_coordinator_module()
+
+        def refused(serial, service_id):
+            raise coordinator_module.UbpetAuthError("login refused")
+
+        async def run_in_executor(func, *args):
+            return func(*args)
+
+        def create_task(coro):
+            raise AssertionError("no poll loop should start")
+
+        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor, async_create_task=create_task)
+        client = types.SimpleNamespace(
+            send_mqtt_service=refused,
+            get_dashboard=lambda: {"devices": {"SN1": _loaded_box()}, "cats": []},
+        )
+        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, client)
+        coordinator.data = {"devices": {"SN1": {}}}
+
+        coordinator.cancel_mqtt_state_polls()
+        # A poll that was still running at unload comes back with a refused login.
+        with self.assertLogs(coordinator_module._LOGGER, "WARNING"):
+            asyncio.run(coordinator.async_request_mqtt_state("SN1"))
+        asyncio.run(coordinator._async_update_data())
+        coordinator.enable_mqtt_state_polls()
+
+        self.assertFalse(coordinator._mqtt_state_polls_enabled)
+
+
+class OnePollAtATimeTests(unittest.TestCase):
+    def test_a_box_is_not_polled_again_until_its_last_request_ends(self):
+        import asyncio
+
+        module = load_coordinator_module()
+        sends = []
+        tasks = []
+
+        async def scenario():
+            send_finished = asyncio.get_running_loop().create_future()
+
+            async def run_in_executor(func, *args):
+                sends.append(args)
+                return await send_finished
+
+            hass = types.SimpleNamespace(
+                async_add_executor_job=run_in_executor,
+                async_create_task=lambda coro: tasks.append(asyncio.ensure_future(coro)),
+            )
+            coordinator = module.UbpetDataUpdateCoordinator(hass, types.SimpleNamespace(send_mqtt_service=None))
+            coordinator.data = {"devices": {"SN1": {}}}
+            first = asyncio.ensure_future(coordinator.async_request_mqtt_state("SN1"))
+            await asyncio.sleep(0)
+
+            # Long overdue, but the first send is still running: no second one joins the queue.
+            coordinator._next_mqtt_poll_at_by_serial["SN1"] = datetime.now(UTC) - timedelta(minutes=5)
+            coordinator._run_due_mqtt_state_polls()
+            await coordinator.async_request_mqtt_state("SN1")
+            self.assertEqual((len(sends), tasks), (1, []))
+
+            send_finished.set_result({"target_uid": "717401", "received_messages": []})
+            await first
+            self.assertNotIn("SN1", coordinator._mqtt_state_requests_in_progress)
+            self.assertIn("SN1", coordinator._next_mqtt_poll_at_by_serial)
+
+        asyncio.run(scenario())
 
 
 class FastPollTests(unittest.TestCase):
