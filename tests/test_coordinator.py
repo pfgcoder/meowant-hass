@@ -210,7 +210,6 @@ class GuessedStateTests(unittest.TestCase):
     def setUp(self):
         coordinator_module = load_coordinator_module()
         self.coordinator = coordinator_module.UbpetDataUpdateCoordinator(types.SimpleNamespace(), None)
-        self.coordinator._last_rest_update_at = coordinator_module.datetime.now(coordinator_module.UTC)
         self.coordinator.data = {"devices": {"SN1": {}}}
 
     def state(self):

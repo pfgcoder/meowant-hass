@@ -93,7 +93,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._last_rest_update_at = datetime.now(UTC)
         self._keep_failed_parts(data)
-        data = self._with_runtime_state(data)
+        data = self._with_mqtt_state(data)
         if self._mqtt_state_polls_paused_for_auth:
             _LOGGER.info("UPET login works again; restarting MQTT state polls")
             self._mqtt_state_polls_paused_for_auth = False
@@ -143,7 +143,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._mqtt_state_by_serial[serial] = state
         self._mqtt_reply_by_serial[serial] = state
         self._last_mqtt_update_at_by_serial[serial] = datetime.now(UTC)
-        self._update_runtime_data()
+        self._update_mqtt_data()
         return True
 
     @property
@@ -160,7 +160,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         mqtt_state.update({key: value for key, value in state.items() if key in STATE_FIELD_NAMES})
         mqtt_state["guess"] = {"mqtt_service": state.get("mqtt_service"), "at": time.time()}
         self._mqtt_state_by_serial[serial] = mqtt_state
-        self._update_runtime_data()
+        self._update_mqtt_data()
         return mqtt_state
 
     def restore_mqtt_work_state(self, serial: str, guess: dict[str, Any]) -> None:
@@ -175,10 +175,10 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._mqtt_state_by_serial.pop(serial, None)
         else:
             self._mqtt_state_by_serial[serial] = reply
-        self._update_runtime_data()
+        self._update_mqtt_data()
 
-    def _update_runtime_data(self) -> None:
-        self.data = self._with_runtime_state(self.data or {})
+    def _update_mqtt_data(self) -> None:
+        self.data = self._with_mqtt_state(self.data or {})
         self.async_update_listeners()
 
     def start_mqtt_state_poll(self, serial: str, *, fast: bool = False) -> None:
@@ -290,13 +290,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             reason,
         )
 
-    def _with_runtime_state(self, data: dict[str, Any]) -> dict[str, Any]:
-        if (
-            not self._mqtt_state_by_serial
-            and self._last_rest_update_at is None
-            and not self._last_mqtt_update_at_by_serial
-        ):
-            return data
+    def _with_mqtt_state(self, data: dict[str, Any]) -> dict[str, Any]:
         devices = data.get("devices")
         if not isinstance(devices, dict):
             return data
@@ -313,10 +307,6 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 # Also clears a guess that was undone before the box ever replied.
                 item.pop("mqtt_state", None)
-            item["runtime_state"] = {
-                "last_rest_update_at": self._last_rest_update_at,
-                "last_mqtt_update_at": self._last_mqtt_update_at_by_serial.get(serial),
-            }
             merged_devices[serial] = item
         return {**data, "devices": merged_devices}
 

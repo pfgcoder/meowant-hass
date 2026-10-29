@@ -6,11 +6,12 @@ from typing import Any, Callable
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfMass, UnitOfTime
+from homeassistant.const import PERCENTAGE, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfMass, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
@@ -198,7 +199,8 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         # Changes on every poll, which floods the logbook and recorder.
         entity_registry_enabled_default=False,
         device_class=SensorDeviceClass.TIMESTAMP,
-        value_fn=lambda item: _runtime_state_value(item, "last_rest_update_at"),
+        # UbpetDeviceSensor.native_value reads it from the coordinator.
+        value_fn=lambda item: None,
     ),
     UbpetSensorDescription(
         key="last_mqtt_update",
@@ -209,7 +211,8 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         # Changes on every poll, which floods the logbook and recorder.
         entity_registry_enabled_default=False,
         device_class=SensorDeviceClass.TIMESTAMP,
-        value_fn=lambda item: _runtime_state_value(item, "last_mqtt_update_at"),
+        # UbpetDeviceSensor.native_value reads it from the coordinator.
+        value_fn=lambda item: None,
     ),
 )
 
@@ -258,7 +261,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     coordinator: UbpetDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[SensorEntity] = []
     for serial in coordinator.data.get("devices", {}):
-        entities.extend(UbpetDeviceSensor(coordinator, entry.entry_id, serial, description) for description in DEVICE_SENSORS)
+        for description in DEVICE_SENSORS:
+            sensor_class = UbpetLastUsedBySensor if description.key == "last_used_by" else UbpetDeviceSensor
+            entities.append(sensor_class(coordinator, entry.entry_id, serial, description))
     for cat in coordinator.data.get("cats", []):
         cat_id = cat.get("catInfoId")
         if cat_id is None:
@@ -328,6 +333,7 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
             return {
                 "device_status_code": item.get("device", {}).get("deviceStatus"),
                 "mqtt_work_state": _mqtt_state_value(item, "w_state_app_name"),
+                **_guessed(item),
             }
         if self.entity_description.key == "last_visit":
             return _last_visit_attributes(item)
@@ -338,8 +344,33 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
             mqtt_state = item.get("mqtt_state")
             if not isinstance(mqtt_state, dict):
                 return {}
-            return {key: value for key, value in mqtt_state.items() if key in MQTT_ATTRIBUTE_FIELDS}
+            return {
+                **{key: value for key, value in mqtt_state.items() if key in MQTT_ATTRIBUTE_FIELDS},
+                **_guessed(item),
+            }
         return {}
+
+
+class UbpetLastUsedBySensor(UbpetDeviceSensor, RestoreEntity):
+    """Last used by, which keeps the cat from before a restart until the records name one."""
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if self._last_visit or last_state is None or last_state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            return
+        attributes = last_state.attributes
+        when = dt_util.parse_datetime(str(attributes.get("time")))
+        if when is None:
+            return
+        # Back into the record form _visit_summary reads.
+        self._last_visit = {
+            "catNickname": last_state.state,
+            "eventTime": int(when.timestamp() * 1000),
+            "weight": attributes.get("weight_kg"),
+            "costTime": attributes.get("duration_s"),
+            "eventType": attributes.get("event_type"),
+        }
 
 
 class UbpetCatSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity):
@@ -577,8 +608,6 @@ def _mqtt_state_value(item: dict[str, Any], key: str) -> Any:
     return mqtt_state.get(key)
 
 
-def _runtime_state_value(item: dict[str, Any], key: str) -> Any:
-    runtime_state = item.get("runtime_state")
-    if not isinstance(runtime_state, dict):
-        return None
-    return runtime_state.get(key)
+def _guessed(item: dict[str, Any]) -> dict[str, bool]:
+    """Marks a state guessed from a button press, shown until the box replies."""
+    return {"guessed": True} if _mqtt_state_value(item, "guess") is not None else {}

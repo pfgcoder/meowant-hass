@@ -35,6 +35,16 @@ class _CoordinatorEntity(Generic[T]):
         self.coordinator = coordinator
 
 
+class _RestoreEntity:
+    last_state = None
+
+    async def async_added_to_hass(self):
+        pass
+
+    async def async_get_last_state(self):
+        return self.last_state
+
+
 def _module(name: str, **attrs) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__dict__.update(attrs)
@@ -59,6 +69,8 @@ def load_sensor_module():
         "homeassistant.const": _module(
             "homeassistant.const",
             PERCENTAGE="%",
+            STATE_UNAVAILABLE="unavailable",
+            STATE_UNKNOWN="unknown",
             UnitOfMass=names(KILOGRAMS="kg"),
             UnitOfTime=names(MINUTES="min", SECONDS="s"),
         ),
@@ -67,12 +79,17 @@ def load_sensor_module():
         "homeassistant.helpers.entity": _module("homeassistant.helpers.entity", EntityCategory=names(DIAGNOSTIC="diagnostic")),
         "homeassistant.helpers.device_registry": _module("homeassistant.helpers.device_registry", DeviceInfo=dict),
         "homeassistant.helpers.entity_platform": _module("homeassistant.helpers.entity_platform", AddEntitiesCallback=object),
+        "homeassistant.helpers.restore_state": _module("homeassistant.helpers.restore_state", RestoreEntity=_RestoreEntity),
         "homeassistant.helpers.update_coordinator": _module(
             "homeassistant.helpers.update_coordinator", CoordinatorEntity=_CoordinatorEntity
         ),
         "homeassistant.util": _module(
             "homeassistant.util",
-            dt=names(start_of_local_day=lambda: MIDNIGHT, as_local=lambda value: value),
+            dt=names(
+                start_of_local_day=lambda: MIDNIGHT,
+                as_local=lambda value: value,
+                parse_datetime=lambda text: datetime.fromisoformat(text) if text and text != "None" else None,
+            ),
         ),
         PACKAGE_NAME: package,
         f"{PACKAGE_NAME}.const": _module(f"{PACKAGE_NAME}.const", DOMAIN="ubpet"),
@@ -101,10 +118,10 @@ def _visit(cat: str, when: datetime, *, event_type: int = 3, cat_id: int | None 
     return record
 
 
-def _device_sensor(key: str, item: dict[str, Any]):
+def _device_sensor(key: str, item: dict[str, Any], sensor_class=None):
     coordinator = types.SimpleNamespace(data={"devices": {"SN1": item}, "cats": []})
     description = next(description for description in sensor.DEVICE_SENSORS if description.key == key)
-    return sensor.UbpetDeviceSensor(coordinator, "entry", "SN1", description)
+    return (sensor_class or sensor.UbpetDeviceSensor)(coordinator, "entry", "SN1", description)
 
 
 class LastUsedByTests(unittest.TestCase):
@@ -137,6 +154,37 @@ class LastUsedByTests(unittest.TestCase):
 
         self.assertIsNone(entity.native_value)
         self.assertIsNone(entity.extra_state_attributes)
+
+    def test_keeps_the_cat_from_before_a_restart_until_the_records_name_one(self):
+        import asyncio
+
+        item = {"cat_records": []}
+        entity = _device_sensor("last_used_by", item, sensor.UbpetLastUsedBySensor)
+        visit_time = MIDNIGHT - timedelta(hours=2)
+        entity.last_state = types.SimpleNamespace(
+            state="Tiny",
+            attributes={"time": visit_time.isoformat(), "cat": "Tiny", "weight_kg": 6.7, "duration_s": 38, "event_type": 3, "friendly_name": "x"},
+        )
+
+        asyncio.run(entity.async_added_to_hass())
+
+        self.assertEqual(entity.native_value, "Tiny")
+        self.assertEqual(
+            entity.extra_state_attributes,
+            {"time": visit_time.isoformat(), "cat": "Tiny", "weight_kg": 6.7, "duration_s": 38, "event_type": 3},
+        )
+        item["cat_records"] = [_visit("Freya", MIDNIGHT + timedelta(hours=1))]
+        self.assertEqual(entity.native_value, "Freya")
+
+    def test_restores_nothing_from_an_unknown_state(self):
+        import asyncio
+
+        entity = _device_sensor("last_used_by", {"cat_records": []}, sensor.UbpetLastUsedBySensor)
+        entity.last_state = types.SimpleNamespace(state="unknown", attributes={})
+
+        asyncio.run(entity.async_added_to_hass())
+
+        self.assertIsNone(entity.native_value)
 
 
 class TodayCountTests(unittest.TestCase):
@@ -200,10 +248,18 @@ class AttributeTests(unittest.TestCase):
 
         attributes = _device_sensor("mqtt_work_state", item).extra_state_attributes
 
-        self.assertEqual(attributes, {"w_mode": 0, "w_state_app_name": "PENDING", "w_cause": 90})
+        # A guess shows as a flag only, not its press time.
+        self.assertEqual(attributes, {"w_mode": 0, "w_state_app_name": "PENDING", "w_cause": 90, "guessed": True})
+
+    def test_box_status_marks_a_guessed_state_until_the_box_replies(self):
+        guessed = {"mqtt_state": {"w_state_app_name": "RUNNING", "guess": {"at": 1.0}}}
+        replied = {"mqtt_state": {"w_state_app_name": "RUNNING"}}
+
+        self.assertTrue(_device_sensor("box_status", guessed).extra_state_attributes["guessed"])
+        self.assertNotIn("guessed", _device_sensor("box_status", replied).extra_state_attributes)
 
     def test_timestamp_sensors_and_plain_sensors_carry_no_attributes(self):
-        item = {"runtime_state": {"last_rest_update_at": MIDNIGHT}, "box_use_times": {"boxUseTimes": 3}}
+        item = {"box_use_times": {"boxUseTimes": 3}}
 
         for key in ("last_rest_update", "last_mqtt_update", "box_use_times"):
             with self.subTest(key=key):
