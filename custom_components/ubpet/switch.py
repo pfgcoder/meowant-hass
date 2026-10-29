@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -155,6 +156,13 @@ class UbpetAutoCleanSwitch(UbpetBaseSwitch):
     async def _set_auto_clean(self, enabled: bool) -> None:
         item = self._device_item or {}
         lazy_time = item.get("config", {}).get("lazyTime")
+        if lazy_time is None:
+            # The box takes the switch and the delay as one setting, so sending the switch alone
+            # would reset the delay to 8 minutes.
+            raise HomeAssistantError(
+                "The auto clean delay isn't known right now, so auto clean can't be changed without "
+                "resetting it. Try again after the next update."
+            )
         await self.hass.async_add_executor_job(
             self.coordinator.client.set_auto_clean_enabled,
             self._serial,

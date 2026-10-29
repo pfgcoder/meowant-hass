@@ -6,6 +6,7 @@ from homeassistant.components.number import NumberEntity, NumberEntityDescriptio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTime
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -65,13 +66,19 @@ class UbpetAutoCleanDelayNumber(CoordinatorEntity[UbpetDataUpdateCoordinator], N
     async def async_set_native_value(self, value: float) -> None:
         minutes = int(round(value))
         item = self.coordinator.data.get("devices", {}).get(self._serial) or {}
-        # Keep auto clean as it is; only an unknown switch falls back to on, as before.
         auto_clean = item.get("config", {}).get("sensorSwitch")
+        if auto_clean is None:
+            # The box takes the delay and the switch as one setting, so a guess could turn auto
+            # clean on or off.
+            raise HomeAssistantError(
+                "Whether auto clean is on isn't known right now, so the delay can't be set without "
+                "changing it. Try again after the next update."
+            )
         await self.hass.async_add_executor_job(
             self.coordinator.client.set_auto_clean_delay,
             self._serial,
             minutes,
-            auto_clean is None or auto_clean == 1,
+            auto_clean == 1,
         )
         await self.coordinator.async_request_refresh()
 
