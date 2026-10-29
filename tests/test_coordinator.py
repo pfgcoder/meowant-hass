@@ -117,26 +117,93 @@ class MqttStateReplyTests(unittest.TestCase):
         self.assertIsNone(self.coordinator._latest_mqtt_state(result))
 
 
-class PreviousRecordsTests(unittest.TestCase):
-    def test_records_that_failed_to_load_keep_the_last_ones(self):
-        coordinator = load_coordinator_module()
-        previous = {"devices": {"SN1": {"cat_records": [{"eventTime": 1}], "device_records": [{"eventTime": 2}]}}}
-        data = {"devices": {"SN1": {"cat_records": None, "device_records": []}, "SN2": {"cat_records": None}}}
+def _loaded_box(**parts) -> dict:
+    box = {"device": {}, "config": {}, "box_use_times": {}, "deodorant": {}, "online": {}, "cat_records": [], "device_records": []}
+    return {**box, **parts}
 
-        coordinator._keep_previous_records(data, previous)
 
+class FailedPartsTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_coordinator_module()
+        self.coordinator = self.module.UbpetDataUpdateCoordinator(types.SimpleNamespace(), None)
+        self.coordinator.data = {
+            "devices": {"SN1": _loaded_box(config={"lazyTime": 900}, cat_records=[{"eventTime": 1}])},
+            "cats": [{"catInfoId": 5}],
+        }
+
+    def keep(self, box: dict, cats=None) -> dict:
+        data = {"devices": {"SN1": box}, "cats": cats}
+        self.coordinator._keep_failed_parts(data)
+        self.coordinator.data = data
+        return data
+
+    def test_parts_that_failed_to_load_keep_their_last_values(self):
+        with self.assertLogs(self.module._LOGGER, "WARNING"):
+            data = self.keep(_loaded_box(config=None, cat_records=None, device_records=[]))
+
+        self.assertEqual(data["devices"]["SN1"]["config"], {"lazyTime": 900})
         self.assertEqual(data["devices"]["SN1"]["cat_records"], [{"eventTime": 1}])
-        # Loaded but empty stays empty, and a box with nothing earlier stays without records.
+        self.assertEqual(data["cats"], [{"catInfoId": 5}])
+        # Loaded but empty stays empty.
         self.assertEqual(data["devices"]["SN1"]["device_records"], [])
-        self.assertIsNone(data["devices"]["SN2"]["cat_records"])
 
-    def test_first_update_has_nothing_to_keep(self):
-        coordinator = load_coordinator_module()
-        data = {"devices": {"SN1": {"cat_records": None}}}
+    def test_with_nothing_to_keep_a_failed_part_is_empty(self):
+        self.coordinator.data = None
+        with self.assertLogs(self.module._LOGGER, "WARNING"):
+            data = self.keep(_loaded_box(config=None, cat_records=None))
 
-        coordinator._keep_previous_records(data, None)
+        self.assertEqual(data["devices"]["SN1"]["config"], {})
+        self.assertEqual(data["devices"]["SN1"]["cat_records"], [])
+        self.assertEqual(data["cats"], [])
 
-        self.assertIsNone(data["devices"]["SN1"]["cat_records"])
+    def test_a_part_failing_for_over_an_hour_goes_empty(self):
+        with self.assertLogs(self.module._LOGGER, "WARNING"):
+            self.keep(_loaded_box(cat_records=None), cats=[])
+        self.coordinator._parts_failing_since[("SN1", "cat_records")] -= timedelta(minutes=61)
+
+        data = self.keep(_loaded_box(cat_records=None), cats=[])
+
+        self.assertEqual(data["devices"]["SN1"]["cat_records"], [])
+
+    def test_a_failing_part_warns_once_then_logs_when_it_loads_again(self):
+        with self.assertLogs(self.module._LOGGER, "INFO") as logs:
+            self.keep(_loaded_box(cat_records=None), cats=[])
+            self.keep(_loaded_box(cat_records=None), cats=[])
+            self.keep(_loaded_box(cat_records=[{"eventTime": 2}]), cats=[])
+
+        self.assertEqual(
+            [record.levelname for record in logs.records],
+            ["WARNING", "INFO"],
+        )
+        self.assertNotIn(("SN1", "cat_records"), self.coordinator._parts_failing_since)
+
+
+class MqttPollFailureLogTests(unittest.TestCase):
+    def test_failing_polls_warn_once_and_log_when_they_work_again(self):
+        import asyncio
+
+        module = load_coordinator_module()
+        replies = [OSError("timed out"), OSError("timed out"), {"target_uid": "717401", "received_messages": []}]
+
+        def send(serial, service_id):
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        async def run_in_executor(func, *args):
+            return func(*args)
+
+        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
+        coordinator = module.UbpetDataUpdateCoordinator(hass, types.SimpleNamespace(send_mqtt_service=send))
+        coordinator.data = {"devices": {"SN1": {}}}
+
+        with self.assertLogs(module._LOGGER, "INFO") as logs:
+            for _ in range(3):
+                asyncio.run(coordinator.async_request_mqtt_state("SN1"))
+
+        self.assertEqual(len([record for record in logs.records if record.levelname == "WARNING"]), 1)
+        self.assertTrue(any("work again" in record.getMessage() for record in logs.records))
 
 
 class GuessedStateTests(unittest.TestCase):

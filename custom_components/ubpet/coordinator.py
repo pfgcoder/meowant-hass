@@ -25,8 +25,20 @@ MQTT_STATE_PENDING_POLL_SECONDS = 60
 MQTT_STATE_POLL_HEARTBEAT_SECONDS = 1
 MQTT_STATE_REQUEST_TIMEOUT_SECONDS = 30
 MQTT_STATE_IN_PROGRESS_STALE_SECONDS = 45
-# Each box's visit and clean records, from get_dashboard.
-RECORD_KEYS = ("cat_records", "device_records")
+# The parts get_dashboard reads besides each box's device entry, per box and for the account, with
+# what each reads as empty. A part whose call failed comes back as None: the update shows its last
+# values for up to KEEP_FAILED_PART_MINUTES, then (or with nothing to keep) an empty one, which the
+# sensors show as unknown, so a lasting failure shows.
+BOX_PARTS = {
+    "config": dict,
+    "box_use_times": dict,
+    "deodorant": dict,
+    "online": dict,
+    "cat_records": list,
+    "device_records": list,
+}
+ACCOUNT_PARTS = {"cats": list}
+KEEP_FAILED_PART_MINUTES = 60
 
 
 class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -50,6 +62,10 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_rest_update_at: datetime | None = None
         self._last_mqtt_update_at_by_serial: dict[str, datetime] = {}
         self._next_mqtt_poll_at_by_serial: dict[str, datetime] = {}
+        # When each part that's failing to load, keyed (owner, part), first failed.
+        self._parts_failing_since: dict[tuple[str, str], datetime] = {}
+        # Boxes whose MQTT state polls are failing, logged at debug level after the first warning.
+        self._mqtt_polls_failing: set[str] = set()
 
     async def _async_update_data(self) -> dict[str, Any]:
         started = time.monotonic()
@@ -62,7 +78,9 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._pause_mqtt_state_polls_for_auth()
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OSError, RuntimeError, UbpetApiError) as err:
-            _LOGGER.exception("UPET data update failed")
+            # Home Assistant logs the error when updates start failing and again when they recover;
+            # a traceback on every failed update would flood the log through an outage.
+            _LOGGER.debug("UPET data update failed", exc_info=True)
             raise UpdateFailed(str(err)) from err
 
         devices = data.get("devices", {})
@@ -74,7 +92,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             len(cats) if isinstance(cats, list) else 0,
         )
         self._last_rest_update_at = datetime.now(UTC)
-        _keep_previous_records(data, self.data)
+        self._keep_failed_parts(data)
         data = self._with_runtime_state(data)
         if self._mqtt_state_polls_paused_for_auth:
             _LOGGER.info("UPET login works again; restarting MQTT state polls")
@@ -84,6 +102,39 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._ensure_mqtt_state_poll_task()
             self._ensure_mqtt_state_polls(data)
         return data
+
+    def _keep_failed_parts(self, data: dict[str, Any]) -> None:
+        """Fill in the parts that failed to load, so one failed call doesn't drop sensors to unknown
+        and back (re-firing automations), and log when a part starts and stops failing."""
+        now = datetime.now(UTC)
+        previous = self.data or {}
+        previous_devices = previous.get("devices") or {}
+        owners = [("the account", data, previous, ACCOUNT_PARTS)]
+        devices = data.get("devices")
+        if isinstance(devices, dict):
+            owners += [
+                (serial, item, previous_devices.get(serial) or {}, BOX_PARTS)
+                for serial, item in devices.items()
+                if isinstance(item, dict)
+            ]
+        for owner, item, before, parts in owners:
+            for part, empty in parts.items():
+                if item.get(part) is not None:
+                    if self._parts_failing_since.pop((owner, part), None) is not None:
+                        _LOGGER.info("UPET %s for %s loads again", part, owner)
+                    continue
+                since = self._parts_failing_since.get((owner, part))
+                if since is None:
+                    since = self._parts_failing_since[(owner, part)] = now
+                    _LOGGER.warning(
+                        "UPET couldn't load %s for %s; showing the last values for up to %s minutes",
+                        part,
+                        owner,
+                        KEEP_FAILED_PART_MINUTES,
+                    )
+                kept = before.get(part)
+                expired = now - since > timedelta(minutes=KEEP_FAILED_PART_MINUTES)
+                item[part] = empty() if kept is None or expired else kept
 
     def store_mqtt_result(self, serial: str, result: dict[str, Any] | object) -> bool:
         state = _latest_mqtt_state(result)
@@ -190,6 +241,9 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if isinstance(result, dict):
                 result.setdefault("service_id", "request_state")
             updated = self.store_mqtt_result(serial, result)
+            if serial in self._mqtt_polls_failing:
+                self._mqtt_polls_failing.discard(serial)
+                _LOGGER.info("UPET MQTT state polls work again for %s", serial)
             item = self.data.get("devices", {}).get(serial) if self.data else None
             _LOGGER.info(
                 "Finished UPET MQTT state request for %s updated=%s state=%s mode=%s received=%s",
@@ -200,23 +254,32 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 result.get("received_count") if isinstance(result, dict) else None,
             )
         except TimeoutError:
-            _LOGGER.warning(
-                "UPET MQTT state poll timed out for %s after %ss",
-                serial,
-                MQTT_STATE_REQUEST_TIMEOUT_SECONDS,
-            )
+            self._mqtt_poll_failed(serial, f"timed out after {MQTT_STATE_REQUEST_TIMEOUT_SECONDS}s")
         except UbpetAuthError as err:
             # Stop polling with a refused password. The next data update either logs in, which
             # restarts the polls, or starts the reauth.
             _LOGGER.warning("UPET MQTT state poll stopped for %s: login refused: %s", serial, err)
             self._pause_mqtt_state_polls_for_auth()
         except (OSError, RuntimeError, UbpetApiError) as err:
-            _LOGGER.warning("UPET MQTT state poll failed for %s: %s", serial, err)
+            self._mqtt_poll_failed(serial, str(err))
         except Exception:
             _LOGGER.exception("Unexpected UPET MQTT state poll failure for %s", serial)
         finally:
             self._mqtt_state_request_started_at_by_serial.pop(serial, None)
             self._schedule_next_mqtt_state_poll(serial)
+
+    def _mqtt_poll_failed(self, serial: str, reason: str) -> None:
+        # While the box or the cloud can't be reached every poll fails, once a minute or more, so
+        # only the first one is a warning.
+        if serial in self._mqtt_polls_failing:
+            _LOGGER.debug("UPET MQTT state poll failed again for %s: %s", serial, reason)
+            return
+        self._mqtt_polls_failing.add(serial)
+        _LOGGER.warning(
+            "UPET MQTT state poll failed for %s: %s; logging further failures at debug level until a poll works",
+            serial,
+            reason,
+        )
 
     def _with_runtime_state(self, data: dict[str, Any]) -> dict[str, Any]:
         if (
@@ -301,21 +364,6 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             MQTT_STATE_IN_PROGRESS_STALE_SECONDS,
         )
         return True
-
-
-def _keep_previous_records(data: dict[str, Any], previous: dict[str, Any] | None) -> None:
-    """Fill in records that failed to load (None) with the last ones, so Last visit, Last used by and
-    the today counts don't drop to unknown and back, re-firing automations."""
-    devices = data.get("devices")
-    if not isinstance(devices, dict):
-        return
-    previous_devices = (previous or {}).get("devices") or {}
-    for serial, item in devices.items():
-        if not isinstance(item, dict):
-            continue
-        for key in RECORD_KEYS:
-            if item.get(key) is None:
-                item[key] = (previous_devices.get(serial) or {}).get(key)
 
 
 def _latest_mqtt_state(result: dict[str, Any] | object) -> dict[str, Any] | None:

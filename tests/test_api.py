@@ -762,7 +762,8 @@ class ApiUnitTests(unittest.TestCase):
 
         self.assertEqual(data["devices"]["SN123"]["device"]["deviceName"], "Box")
         self.assertEqual(data["devices"]["SN123"]["config"]["wifiName"], "wifi")
-        self.assertEqual(data["devices"]["SN123"]["deodorant"], {})
+        # The coordinator keeps the last values in place of a part that failed.
+        self.assertIsNone(data["devices"]["SN123"]["deodorant"])
         self.assertEqual(data["cats"][0]["nickname"], "Cat")
 
     def test_require_helpers_reject_bad_shapes(self):

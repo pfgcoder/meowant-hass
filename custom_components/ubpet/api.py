@@ -434,20 +434,20 @@ class UbpetClient:
             serial = device.get("serialNumber")
             if not serial:
                 continue
+            # Each part is None when its call failed, so the update can keep the last values instead.
             by_serial[serial] = {
                 "device": device,
-                "config": _safe_dict_call(self.get_all_config, serial),
-                "box_use_times": _safe_dict_call(self.get_box_use_times, serial),
-                "deodorant": _safe_dict_call(self.get_deodorant_status, serial),
-                "online": _safe_dict_call(self.get_device_online, serial),
-                # Visits, then cleans. None when the call failed, so the update can keep the last
-                # records instead.
-                "cat_records": _optional_list_call(self.get_box_records, serial, 0, self.records_per_fetch),
-                "device_records": _optional_list_call(self.get_box_records, serial, 1, self.records_per_fetch),
+                "config": _optional_call(self.get_all_config, serial),
+                "box_use_times": _optional_call(self.get_box_use_times, serial),
+                "deodorant": _optional_call(self.get_deodorant_status, serial),
+                "online": _optional_call(self.get_device_online, serial),
+                # Visits, then cleans.
+                "cat_records": _optional_call(self.get_box_records, serial, 0, self.records_per_fetch),
+                "device_records": _optional_call(self.get_box_records, serial, 1, self.records_per_fetch),
             }
         return {
             "devices": by_serial,
-            "cats": _safe_list_call(self.get_cats),
+            "cats": _optional_call(self.get_cats),
             "user_id": self.auth.user_id if self.auth else None,
         }
 
@@ -652,28 +652,13 @@ def _summarize_mqtt_result(result: dict[str, Any], *, target_uid: str) -> dict[s
     }
 
 
-def _safe_dict_call(func, *args) -> dict[str, Any]:
+def _optional_call(func, *args) -> Any:
+    """The call's result, or None when it failed; the coordinator logs parts that keep failing."""
     try:
         return func(*args)
     except UbpetLoginError:
         # A failed login fails the whole update; swallowing it would log in again on each
         # remaining call, about 20 logins for one update.
-        raise
-    except (OSError, RuntimeError, UbpetApiError) as err:
-        _LOGGER.debug("UPET optional endpoint failed: %s", err)
-        return {}
-
-
-def _safe_list_call(func, *args) -> list[dict[str, Any]]:
-    result = _optional_list_call(func, *args)
-    return [] if result is None else result
-
-
-def _optional_list_call(func, *args) -> list[dict[str, Any]] | None:
-    """Like _safe_list_call, but None when the call failed rather than returned nothing."""
-    try:
-        return func(*args)
-    except UbpetLoginError:
         raise
     except (OSError, RuntimeError, UbpetApiError) as err:
         _LOGGER.debug("UPET optional endpoint failed: %s", err)
