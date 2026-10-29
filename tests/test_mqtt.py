@@ -160,6 +160,23 @@ class MqttCodecUnitTests(unittest.TestCase):
             self.publish(conn)
         self.assertEqual(len(conn.sent), 1)
 
+    def test_refused_subscription_is_a_connect_error(self):
+        class RefusingSubscriptionConnection(FakeConnection):
+            def sendall(self, packet: bytes) -> None:
+                packet_type, flags, payload = parse_packet(packet)
+                self.sent.append((packet_type, flags, payload))
+                if packet_type == 1:
+                    self.buffer += mqtt.mqtt_packet(0x20, b"\x00\x00")
+                elif packet_type == 8:
+                    # SUBACK with return code 0x80: failure.
+                    self.buffer += mqtt.mqtt_packet(0x90, payload[:2] + b"\x80")
+
+        conn = RefusingSubscriptionConnection()
+        with self.assertRaises(mqtt.MqttConnectError):
+            self.publish(conn)
+        # Nothing was published.
+        self.assertEqual([packet_type for packet_type, _flags, _payload in conn.sent], [1, 8])
+
     def test_broker_hanging_up_on_connect_is_a_connect_error(self):
         class HangingUpConnection(FakeConnection):
             def recv(self, length: int) -> bytes:

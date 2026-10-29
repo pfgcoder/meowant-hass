@@ -501,7 +501,8 @@ def publish_service_on_connection(
 
     conn.sendall(mqtt_packet(0x82, mqtt_subscribe_payload(packet_id=1, topic=sub_topic, qos=1)))
     suback = _read_broker_answer(conn, timeout, "SUBSCRIBE")
-    if suback[0] != 9:
+    # A SUBACK holds the packet ID, then the granted QoS, or 0x80 for a refused subscription.
+    if suback[0] != 9 or suback[2][2:3] == b"\x80":
         raise MqttConnectError("MQTT SUBSCRIBE refused")
 
     parts = resolve_service_payload(
