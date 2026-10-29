@@ -198,9 +198,10 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     devices = await self.hass.async_add_executor_job(_validate_input, connection_data)
                 except ValueError:
                     errors["base"] = "missing_required"
-                except UbpetApiError:
+                except UbpetAuthError:
                     errors["base"] = "auth_failed"
-                except OSError:
+                except (OSError, UbpetApiError):
+                    # Includes a login that failed on the network or a busy server, as in reauth.
                     errors["base"] = "cannot_connect"
                 except Exception:
                     errors["base"] = "unknown"

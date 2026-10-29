@@ -863,6 +863,22 @@ class ApiUnitTests(unittest.TestCase):
             client.login()
         self.assertEqual(caught.exception.status, 429)
 
+    def test_login_that_cannot_reach_the_server_fails_as_a_login_error_after_one_try(self):
+        client = self.make_client()
+        tried = []
+
+        def unreachable(account_type):
+            tried.append(account_type)
+            raise TimeoutError("timed out")
+
+        client._login_with_account_type = unreachable
+
+        # A login error, so the optional calls of an update stop instead of each logging in again.
+        with self.assertRaises(api.UbpetLoginError) as caught:
+            client.login()
+        self.assertNotIsInstance(caught.exception, api.UbpetAuthError)
+        self.assertEqual(len(tried), 1)
+
     def test_box_records_with_null_data_fail_as_an_api_error(self):
         client = self.make_client()
         client._request = lambda method, path, *, payload=None, auth: {"code": 0, "data": None}

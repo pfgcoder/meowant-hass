@@ -177,6 +177,10 @@ class UbpetClient:
                     raise UbpetAuthError(err.status, err.payload) from err
                 last_error = err
                 no_such_account = no_such_account and code in NO_SUCH_ACCOUNT_CODES
+            except OSError as err:
+                # The server can't be reached, as any other account type would find. As a login
+                # error it ends the update, rather than each remaining call trying to log in again.
+                raise UbpetLoginError(0, {"message": f"login failed: {err}"}) from err
         if last_error is not None:
             if no_such_account:
                 # No account type found the account, so retrying can't help either.
