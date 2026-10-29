@@ -495,14 +495,14 @@ def publish_service_on_connection(
     account_uid = from_uid or _first_text(credentials, "uid", "userId", "imUserId", "accountUid")
 
     conn.sendall(mqtt_packet(0x10, mqtt_connect_payload(client_id=client_id, username=username, password=password)))
-    connack = read_mqtt_packet(conn, timeout)
-    if connack is None or connack[0] != 2 or connack[2] != b"\x00\x00":
-        raise MqttConnectError("MQTT CONNECT failed")
+    connack = _read_broker_answer(conn, timeout, "CONNECT")
+    if connack[0] != 2 or connack[2] != b"\x00\x00":
+        raise MqttConnectError("MQTT CONNECT refused")
 
     conn.sendall(mqtt_packet(0x82, mqtt_subscribe_payload(packet_id=1, topic=sub_topic, qos=1)))
-    suback = read_mqtt_packet(conn, timeout)
-    if suback is None or suback[0] != 9:
-        raise MqttConnectError("MQTT SUBSCRIBE failed")
+    suback = _read_broker_answer(conn, timeout, "SUBSCRIBE")
+    if suback[0] != 9:
+        raise MqttConnectError("MQTT SUBSCRIBE refused")
 
     parts = resolve_service_payload(
         service_id,
@@ -535,6 +535,23 @@ def publish_service_on_connection(
         cmd=parts.cmd,
         received_messages=tuple(received_messages),
     )
+
+
+def _read_broker_answer(conn: Any, timeout: float, request: str) -> tuple[int, int, bytes]:
+    """The broker's answer to CONNECT or SUBSCRIBE.
+
+    A broker may turn a login away by hanging up instead of answering, so that's a MqttConnectError
+    like a refusal. No answer in time is a slow broker, not a refusal, and stays a plain error.
+    """
+    try:
+        packet = read_mqtt_packet(conn, timeout)
+    except TimeoutError:
+        raise
+    except (OSError, RuntimeError) as err:
+        raise MqttConnectError(f"MQTT {request} refused: {err}") from err
+    if packet is None:
+        raise RuntimeError(f"MQTT {request} timed out")
+    return packet
 
 
 def publish_service(

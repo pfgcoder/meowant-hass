@@ -52,6 +52,8 @@ WRONG_PASSWORD_CODES = frozenset({2002, 2006, 2014, 2342})
 # incorrect", 2011 bad phone number, 2019 bad email, and 1009 "parameter error", which an email
 # account gets for account type 2.
 NO_SUCH_ACCOUNT_CODES = frozenset({1009, 2004, 2010, 2011, 2019, 2042})
+# The shortest time between two lookups of a box's IM contact after state requests it didn't answer.
+IM_CONTACT_RECHECK_SECONDS = 600
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -119,12 +121,14 @@ class UbpetClient:
         self.signer = UbtV2Signer(app_key)
         self.auth: UbpetAuth | None = None
         self._auth_lock = threading.Lock()
-        # The IM login (MQTT credentials and our sender uid) and each box's IM contact, reused
-        # between MQTT sends instead of fetched over REST every time; dropped when a send fails.
-        # Polls for several boxes and button presses run in different threads, hence the lock.
-        self._im_lock = threading.Lock()
+        # The IM login (MQTT credentials and our sender uid) and each box's IM contact with when it
+        # was looked up, reused between MQTT sends instead of fetched over REST every time; the
+        # login is dropped when a send fails. The MQTT client ID comes with the IM login, and the
+        # broker drops a connection when another opens with its ID, so polls and button presses
+        # (in different threads) send one at a time under this lock, which also guards the cache.
+        self._mqtt_lock = threading.Lock()
         self._im_session: tuple[dict[str, Any], str] | None = None
-        self._im_contacts: dict[str, dict[str, Any]] = {}
+        self._im_contacts: dict[str, tuple[dict[str, Any], float]] = {}
 
     def ensure_login(self) -> UbpetAuth:
         if auth := self._usable_auth():
@@ -264,15 +268,20 @@ class UbpetClient:
         return _require_list(data)
 
     def send_mqtt_service(self, serial_number: str, service_id: str) -> dict[str, Any]:
-        try:
-            return self._send_mqtt_service_once(serial_number, service_id)
-        except MqttConnectError as err:
-            # Most likely the reused IM login expired. Nothing was published, so a retry with a
-            # fresh login can't send the command twice.
-            _LOGGER.info("UPET MQTT %s for %s; logging in to IM again and retrying once", err, serial_number)
-            return self._send_mqtt_service_once(serial_number, service_id)
+        with self._mqtt_lock:
+            reused_login = self._im_session is not None
+            try:
+                return self._send_mqtt_service_once(serial_number, service_id)
+            except MqttConnectError as err:
+                if not reused_login:
+                    raise
+                # The broker turned away the reused IM login, most likely expired. Nothing was
+                # published, so a retry with a fresh login can't send the command twice.
+                _LOGGER.info("UPET MQTT %s for %s; logging in to IM again and retrying once", err, serial_number)
+                return self._send_mqtt_service_once(serial_number, service_id)
 
     def _send_mqtt_service_once(self, serial_number: str, service_id: str) -> dict[str, Any]:
+        """One send, under _mqtt_lock."""
         credentials, from_uid, contact = self._im_session_for(serial_number)
         publish_credentials, publish_sources = _mqtt_publish_credentials(credentials)
         target_uid = str(contact["userId"])
@@ -290,8 +299,7 @@ class UbpetClient:
             )
         except (OSError, RuntimeError):
             # The reused IM login may have expired; the next send fetches a fresh one.
-            with self._im_lock:
-                self._im_session = None
+            self._im_session = None
             raise
         result = parts.as_dict()
         result["from_uid"] = from_uid
@@ -309,22 +317,24 @@ class UbpetClient:
         result["matched_contact"] = _safe_contact_summary(contact)
         result.update(_summarize_mqtt_result(result, target_uid=target_uid))
         if service_id == "request_state" and result["target_reply_status"] != "observed":
-            # The box always answers a state request when it's online. Its IM contact may have
-            # changed (the box was paired again), so look it up afresh next time.
-            with self._im_lock:
+            # The box always answers a state request when it's online. No answer may mean its IM
+            # contact changed (the box was paired again), or only that the box is offline, so look
+            # the contact up afresh, but not on every poll.
+            _contact, looked_up_at = self._im_contacts.get(serial_number, ({}, 0.0))
+            if time.monotonic() - looked_up_at > IM_CONTACT_RECHECK_SECONDS:
                 self._im_contacts.pop(serial_number, None)
         return result
 
     def _im_session_for(self, serial_number: str) -> tuple[dict[str, Any], str, dict[str, Any]]:
-        with self._im_lock:
-            if self._im_session is None:
-                credentials = self.get_im_credentials()
-                self._im_session = (credentials, _find_account_uid(credentials, self.auth))
-                self._im_contacts = {}
-            if serial_number not in self._im_contacts:
-                self._im_contacts[serial_number] = _find_im_contact(self.get_im_friends(), serial_number)
-            credentials, from_uid = self._im_session
-            return credentials, from_uid, self._im_contacts[serial_number]
+        if self._im_session is None:
+            credentials = self.get_im_credentials()
+            self._im_session = (credentials, _find_account_uid(credentials, self.auth))
+            self._im_contacts = {}
+        if serial_number not in self._im_contacts:
+            contact = _find_im_contact(self.get_im_friends(), serial_number)
+            self._im_contacts[serial_number] = (contact, time.monotonic())
+        credentials, from_uid = self._im_session
+        return credentials, from_uid, self._im_contacts[serial_number][0]
 
     def get_cats(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/catbox-server/web/cat/info", auth=True)

@@ -157,16 +157,36 @@ class MqttCodecUnitTests(unittest.TestCase):
 
         conn = RefusingConnection()
         with self.assertRaises(mqtt.MqttConnectError):
-            mqtt.publish_service_on_connection(
-                conn,
-                credentials={"clientId": "c", "mqttUserName": "u", "mqttPassword": "p", "pubTopic": "pub", "subTopic": "sub"},
-                target_uid="717401",
-                from_uid="717422",
-                service_id="request_state",
-                seq=None,
-                timeout=1,
-            )
+            self.publish(conn)
         self.assertEqual(len(conn.sent), 1)
+
+    def test_broker_hanging_up_on_connect_is_a_connect_error(self):
+        class HangingUpConnection(FakeConnection):
+            def recv(self, length: int) -> bytes:
+                return b""
+
+        with self.assertRaises(mqtt.MqttConnectError):
+            self.publish(HangingUpConnection())
+
+    def test_no_answer_to_connect_in_time_is_not_a_connect_error(self):
+        class SilentConnection(FakeConnection):
+            def sendall(self, packet: bytes) -> None:
+                self.sent.append(parse_packet(packet))
+
+        with self.assertRaises(RuntimeError) as caught:
+            self.publish(SilentConnection())
+        self.assertNotIsInstance(caught.exception, mqtt.MqttConnectError)
+
+    def publish(self, conn):
+        return mqtt.publish_service_on_connection(
+            conn,
+            credentials={"clientId": "c", "mqttUserName": "u", "mqttPassword": "p", "pubTopic": "pub", "subTopic": "sub"},
+            target_uid="717401",
+            from_uid="717422",
+            service_id="request_state",
+            seq=None,
+            timeout=1,
+        )
 
     def test_collect_stops_at_the_awaited_reply(self):
         conn = FakeConnection()

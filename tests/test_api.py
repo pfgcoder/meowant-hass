@@ -936,14 +936,16 @@ class ApiUnitTests(unittest.TestCase):
         self.assertEqual(calls, {"credentials": 2, "friends": 2})
         self.assertFalse(publish.call_args.kwargs["stop_on_state_reply"])
 
-    def test_refused_mqtt_connect_logs_in_to_im_again_and_retries_once(self):
+    def test_refused_mqtt_connect_with_a_reused_login_logs_in_to_im_again_and_retries_once(self):
         client, calls = self.make_im_client()
+        with patch.object(api, "publish_service", return_value=FakeParts()):
+            client.send_mqtt_service("SN123", "request_state")
         sent = []
 
         def refuse_first(**kwargs):
             sent.append(kwargs["service_id"])
             if len(sent) == 1:
-                raise api.MqttConnectError("MQTT CONNECT failed")
+                raise api.MqttConnectError("MQTT CONNECT refused")
             return FakeParts()
 
         with patch.object(api, "publish_service", side_effect=refuse_first):
@@ -952,19 +954,58 @@ class ApiUnitTests(unittest.TestCase):
         self.assertEqual(calls, {"credentials": 2, "friends": 2})
 
         # Only once: a second refusal reaches the caller.
-        with patch.object(api, "publish_service", side_effect=api.MqttConnectError("MQTT CONNECT failed")) as publish:
+        with patch.object(api, "publish_service", side_effect=api.MqttConnectError("MQTT CONNECT refused")) as publish:
             with self.assertRaises(api.MqttConnectError):
                 client.send_mqtt_service("SN123", "start_clean_up")
         self.assertEqual(publish.call_count, 2)
 
-    def test_state_request_without_a_reply_looks_up_the_contact_again(self):
+    def test_refused_mqtt_connect_with_a_fresh_login_is_not_retried(self):
         client, calls = self.make_im_client()
 
-        with patch.object(api, "publish_service", return_value=FakeParts(reply=False)):
-            client.send_mqtt_service("SN123", "request_state")
-        with patch.object(api, "publish_service", return_value=FakeParts()):
-            client.send_mqtt_service("SN123", "request_state")
-            client.send_mqtt_service("SN123", "request_state")
+        with patch.object(api, "publish_service", side_effect=api.MqttConnectError("MQTT CONNECT refused")) as publish:
+            with self.assertRaises(api.MqttConnectError):
+                client.send_mqtt_service("SN123", "start_clean_up")
+        self.assertEqual(publish.call_count, 1)
+        self.assertEqual(calls, {"credentials": 1, "friends": 1})
+
+    def test_mqtt_sends_take_turns(self):
+        import threading
+
+        client, _calls = self.make_im_client()
+        in_flight = []
+        overlapped = []
+
+        def publish(**kwargs):
+            in_flight.append(True)
+            overlapped.append(len(in_flight) > 1)
+            threading.Event().wait(0.02)
+            in_flight.pop()
+            return FakeParts()
+
+        with patch.object(api, "publish_service", side_effect=publish):
+            threads = [threading.Thread(target=client.send_mqtt_service, args=("SN123", "request_state")) for _ in range(3)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(overlapped, [False, False, False])
+
+    def test_state_request_without_a_reply_looks_up_the_contact_again_at_most_every_10_minutes(self):
+        client, calls = self.make_im_client()
+        now = [1000.0]
+
+        with patch.object(api.time, "monotonic", side_effect=lambda: now[0]):
+            with patch.object(api, "publish_service", return_value=FakeParts(reply=False)):
+                # Just looked up, so an offline box doesn't cost a lookup per poll.
+                client.send_mqtt_service("SN123", "request_state")
+                client.send_mqtt_service("SN123", "request_state")
+                self.assertEqual(calls["friends"], 1)
+
+                now[0] += 601
+                client.send_mqtt_service("SN123", "request_state")
+            with patch.object(api, "publish_service", return_value=FakeParts()):
+                client.send_mqtt_service("SN123", "request_state")
+                client.send_mqtt_service("SN123", "request_state")
         self.assertEqual(calls, {"credentials": 1, "friends": 2})
 
     def make_im_client(self):
