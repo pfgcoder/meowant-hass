@@ -36,7 +36,7 @@ MQTT_POLL_START_DELAY_SECONDS = 30
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    coordinator = UbpetDataUpdateCoordinator(hass, client_from_entry_data(entry.data, entry.options))
+    coordinator = UbpetDataUpdateCoordinator(hass, entry, client_from_entry_data(entry.data, entry.options))
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator

@@ -5,8 +5,10 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import logging
 import time
+from collections.abc import Coroutine
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -40,10 +42,18 @@ KEEP_FAILED_PART_MINUTES = 60
 
 
 class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    def __init__(self, hass: HomeAssistant, client: UbpetClient, *, update_interval: timedelta = DEFAULT_SCAN_INTERVAL) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        config_entry: ConfigEntry,
+        client: UbpetClient,
+        *,
+        update_interval: timedelta = DEFAULT_SCAN_INTERVAL,
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name=DOMAIN,
             update_interval=update_interval,
             always_update=True,
@@ -188,7 +198,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # still wants the box's real state at once; after a refused login, asking would only try
             # the password again.
             if fast and not self._mqtt_state_polls_paused_for_auth:
-                self.hass.async_create_task(self.async_request_mqtt_state(serial))
+                self._start_background_task(self.async_request_mqtt_state(serial), "ubpet state request")
             return
         _LOGGER.info("Starting UPET MQTT state polling for %s fast=%s", serial, fast)
         self._schedule_mqtt_state_poll(serial, 0 if fast else self._mqtt_state_poll_delay(serial))
@@ -230,7 +240,12 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.warning("UPET MQTT state poll loop was cancelled; restarting")
                 except Exception:
                     _LOGGER.exception("UPET MQTT state poll loop died; restarting")
-            self._mqtt_state_poll_task = self.hass.async_create_task(self._mqtt_state_poll_loop())
+            self._mqtt_state_poll_task = self._start_background_task(self._mqtt_state_poll_loop(), "ubpet state poll loop")
+
+    def _start_background_task(self, target: Coroutine[Any, Any, None], name: str) -> asyncio.Task[None]:
+        # Home Assistant doesn't wait for background tasks when it stops (a send can run for a minute
+        # or more while the cloud struggles), and cancels them when the entry unloads.
+        return self.config_entry.async_create_background_task(self.hass, target, name)
 
     async def _mqtt_state_poll_loop(self) -> None:
         _LOGGER.info("Starting UPET MQTT state poll loop")
@@ -346,7 +361,7 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if due_at is not None and due_at > now:
                 continue
             _LOGGER.info("Running due UPET MQTT state poll for %s", serial)
-            self.hass.async_create_task(self.async_request_mqtt_state(serial))
+            self._start_background_task(self.async_request_mqtt_state(serial), "ubpet state request")
 
     def _mqtt_state_poll_delay(self, serial: str) -> int:
         state = _mqtt_work_state(self.data.get("devices", {}).get(serial) if self.data else None)

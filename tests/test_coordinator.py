@@ -16,8 +16,9 @@ T = TypeVar("T")
 
 
 class _DataUpdateCoordinator(Generic[T]):
-    def __init__(self, hass, logger, **kwargs):
+    def __init__(self, hass, logger, *, config_entry, **kwargs):
         self.hass = hass
+        self.config_entry = config_entry
         self.data = None
 
     def async_update_listeners(self):
@@ -37,6 +38,7 @@ def load_coordinator_module():
     stubs = {
         "homeassistant": _module("homeassistant"),
         "homeassistant.helpers": _module("homeassistant.helpers"),
+        "homeassistant.config_entries": _module("homeassistant.config_entries", ConfigEntry=object),
         "homeassistant.core": _module("homeassistant.core", HomeAssistant=object),
         "homeassistant.helpers.update_coordinator": _module(
             "homeassistant.helpers.update_coordinator",
@@ -117,6 +119,11 @@ class MqttStateReplyTests(unittest.TestCase):
         self.assertIsNone(self.coordinator._latest_mqtt_state(result))
 
 
+def _entry(create_task=None):
+    """A config entry that hands the coroutines of its background tasks to create_task."""
+    return types.SimpleNamespace(async_create_background_task=lambda hass, target, name: create_task(target))
+
+
 def _loaded_box(**parts) -> dict:
     box = {"device": {}, "config": {}, "box_use_times": {}, "deodorant": {}, "online": {}, "cat_records": [], "device_records": []}
     return {**box, **parts}
@@ -125,7 +132,7 @@ def _loaded_box(**parts) -> dict:
 class FailedPartsTests(unittest.TestCase):
     def setUp(self):
         self.module = load_coordinator_module()
-        self.coordinator = self.module.UbpetDataUpdateCoordinator(types.SimpleNamespace(), None)
+        self.coordinator = self.module.UbpetDataUpdateCoordinator(types.SimpleNamespace(), _entry(), None)
         self.coordinator.data = {
             "devices": {"SN1": _loaded_box(config={"lazyTime": 900}, cat_records=[{"eventTime": 1}])},
             "cats": [{"catInfoId": 5}],
@@ -195,7 +202,7 @@ class MqttPollFailureLogTests(unittest.TestCase):
             return func(*args)
 
         hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
-        coordinator = module.UbpetDataUpdateCoordinator(hass, types.SimpleNamespace(send_mqtt_service=send))
+        coordinator = module.UbpetDataUpdateCoordinator(hass, _entry(), types.SimpleNamespace(send_mqtt_service=send))
         coordinator.data = {"devices": {"SN1": {}}}
 
         with self.assertLogs(module._LOGGER, "INFO") as logs:
@@ -209,7 +216,7 @@ class MqttPollFailureLogTests(unittest.TestCase):
 class GuessedStateTests(unittest.TestCase):
     def setUp(self):
         coordinator_module = load_coordinator_module()
-        self.coordinator = coordinator_module.UbpetDataUpdateCoordinator(types.SimpleNamespace(), None)
+        self.coordinator = coordinator_module.UbpetDataUpdateCoordinator(types.SimpleNamespace(), _entry(), None)
         self.coordinator.data = {"devices": {"SN1": {}}}
 
     def state(self):
@@ -271,6 +278,7 @@ class RefusedLoginTests(unittest.TestCase):
 
         coordinator = coordinator_module.UbpetDataUpdateCoordinator(
             types.SimpleNamespace(async_add_executor_job=run_in_executor),
+            _entry(),
             types.SimpleNamespace(get_dashboard=get_dashboard),
         )
         coordinator._mqtt_state_polls_enabled = True
@@ -295,12 +303,12 @@ class RefusedLoginTests(unittest.TestCase):
             coro.close()
             return types.SimpleNamespace(done=lambda: False, cancel=lambda: None)
 
-        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor, async_create_task=create_task)
+        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
         client = types.SimpleNamespace(
             send_mqtt_service=refused,
             get_dashboard=lambda: {"devices": {"SN1": _loaded_box()}, "cats": []},
         )
-        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, client)
+        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, _entry(create_task), client)
         coordinator.data = {"devices": {"SN1": {}}}
         coordinator._mqtt_state_polls_enabled = True
 
@@ -323,9 +331,9 @@ class RefusedLoginTests(unittest.TestCase):
         def create_task(coro):
             raise AssertionError("no poll loop should start")
 
-        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor, async_create_task=create_task)
+        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
         client = types.SimpleNamespace(get_dashboard=lambda: {"devices": {"SN1": _loaded_box()}, "cats": []})
-        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, client)
+        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, _entry(create_task), client)
         coordinator._pause_mqtt_state_polls_for_auth()
 
         coordinator.cancel_mqtt_state_polls()
@@ -347,12 +355,12 @@ class RefusedLoginTests(unittest.TestCase):
         def create_task(coro):
             raise AssertionError("no poll loop should start")
 
-        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor, async_create_task=create_task)
+        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
         client = types.SimpleNamespace(
             send_mqtt_service=refused,
             get_dashboard=lambda: {"devices": {"SN1": _loaded_box()}, "cats": []},
         )
-        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, client)
+        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, _entry(create_task), client)
         coordinator.data = {"devices": {"SN1": {}}}
 
         coordinator.cancel_mqtt_state_polls()
@@ -380,11 +388,12 @@ class OnePollAtATimeTests(unittest.TestCase):
                 sends.append(args)
                 return await send_finished
 
-            hass = types.SimpleNamespace(
-                async_add_executor_job=run_in_executor,
-                async_create_task=lambda coro: tasks.append(asyncio.ensure_future(coro)),
+            hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
+            coordinator = module.UbpetDataUpdateCoordinator(
+                hass,
+                _entry(lambda coro: tasks.append(asyncio.ensure_future(coro))),
+                types.SimpleNamespace(send_mqtt_service=None),
             )
-            coordinator = module.UbpetDataUpdateCoordinator(hass, types.SimpleNamespace(send_mqtt_service=None))
             coordinator.data = {"devices": {"SN1": {}}}
             first = asyncio.ensure_future(coordinator.async_request_mqtt_state("SN1"))
             await asyncio.sleep(0)
@@ -403,12 +412,41 @@ class OnePollAtATimeTests(unittest.TestCase):
         asyncio.run(scenario())
 
 
+class BackgroundTaskTests(unittest.TestCase):
+    def test_state_requests_and_the_poll_loop_are_tasks_shutdown_does_not_wait_for(self):
+        module = load_coordinator_module()
+        started = []
+
+        def create_background_task(hass, target, name):
+            target.close()
+            started.append(name)
+            return types.SimpleNamespace(done=lambda: False, cancel=lambda: None)
+
+        def create_task(target):
+            raise AssertionError("Home Assistant waits for these tasks when it stops")
+
+        coordinator = module.UbpetDataUpdateCoordinator(
+            types.SimpleNamespace(async_create_task=create_task),
+            types.SimpleNamespace(async_create_background_task=create_background_task),
+            None,
+        )
+        coordinator.data = {"devices": {"SN1": {}}}
+
+        # A press before the polls start, then the poll loop, then a due poll.
+        coordinator.start_mqtt_state_poll("SN1", fast=True)
+        coordinator.enable_mqtt_state_polls()
+        coordinator._run_due_mqtt_state_polls()
+
+        self.assertEqual(started, ["ubpet state request", "ubpet state poll loop", "ubpet state request"])
+
+
 class FastPollTests(unittest.TestCase):
     def setUp(self):
         self.requested = []
         coordinator_module = load_coordinator_module()
-        hass = types.SimpleNamespace(async_create_task=lambda request: None)
-        self.coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, None)
+        self.coordinator = coordinator_module.UbpetDataUpdateCoordinator(
+            types.SimpleNamespace(), _entry(lambda request: None), None
+        )
         self.coordinator.async_request_mqtt_state = self.requested.append
 
     def test_a_press_before_polls_start_asks_for_the_state_at_once(self):
