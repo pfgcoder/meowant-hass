@@ -100,9 +100,16 @@ use `custom_components/ubpet/secrets.py.example` as a template for a private
 `secrets.py`.
 
 If the vendor refuses the stored password (for example after it was changed in the app),
-Home Assistant stops updating and asks for the current password under
-`Settings -> Devices & services`. Other login failures, such as a rate limit or an
-outage, are retried at the next update instead.
+or finds no such account, Home Assistant stops updating and asks for the current password
+under `Settings -> Devices & services`. It goes by the vendor's login codes, as the app
+does: 2002, 2006 and 2014 (wrong account or password), 2342 (locked for 10 minutes), and
+2004 (no such user). Other login failures, such as a rate limit or an outage, are retried
+at the next update instead.
+
+If one of the calls behind the sensors fails (the box's settings, use times, deodorant,
+online status, records or the cat list), its sensors keep their last values for up to an
+hour, then show unknown. The log has a warning when a call starts failing and an info line
+when it works again.
 
 Options (`Settings -> Devices & services -> Meowant -> Configure`):
 
@@ -116,7 +123,7 @@ Device sensors:
 
 - Box status.
 - Last visit (time of the newest visit record, with the five most recent as attributes).
-- Last used by (the cat on the newest visit matched to a cat; weights the box couldn't match are skipped).
+- Last used by (the cat on the newest visit matched to a cat; weights the box couldn't match are skipped; kept over a restart).
 - Visits today and Cleans today (restart at local midnight).
 - Empty waste-bin reminder days.
 - Box use times.
@@ -191,9 +198,14 @@ Polling intervals:
 - `PAUSED`: every 10 seconds.
 - `PENDING`/standby/unknown: every 60 seconds.
 
-A state request ends as soon as the box replies. If the broker refuses the cached MQTT login,
-the integration logs in to IM again and retries once; nothing has been published at that point,
-so a command is never sent twice.
+A state request ends as soon as the box replies. Sends go one at a time, since they share the
+MQTT client ID. If the broker refuses or hangs up on the cached MQTT login, the integration logs
+in to IM again and retries once; nothing has been published at that point, so a command is never
+sent twice. After a button press, Box status and the MQTT sensors show the expected state with a
+`guessed: true` attribute until the box replies.
+
+Auto clean and its delay are one setting on the box, so changing either is refused while the
+other isn't known (for example when the settings call failed), rather than overwriting it.
 
 MQTT polling starts after Home Assistant finishes setting up the integration, so startup is not blocked by MQTT traffic.
 
@@ -250,14 +262,14 @@ python3 -m json.tool custom_components/ubpet/translations/uk.json >/tmp/ubpet_uk
 The current tests cover:
 
 - API signing and password hashing.
-- Account type fallback.
+- Account type fallback and login refusal codes.
 - Authenticated request headers.
 - Dashboard aggregation.
-- Settings payload builders.
-- IM credential/contact lookup and retry.
+- Settings payload builders, and the auto clean guard.
+- IM credential/contact lookup, one send at a time, and retry.
 - MQTT codec, packet helpers, RISP/protobuf payload generation, and service ordinals.
-- Coordinator: reauth, MQTT state replies, guessed states and kept records.
-- Sensors: Last used by, today counts, cat matching and attribute filtering.
+- Coordinator: reauth, MQTT state replies, guessed states, kept parts and outage logging.
+- Sensors: Last used by (and its restore), today counts, cat matching and attribute filtering.
 - Setup: unique ID migration and the records option.
 - Entity naming and translations.
 - Diagnostics redaction.

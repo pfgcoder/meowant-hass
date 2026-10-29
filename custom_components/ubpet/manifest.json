@@ -7,6 +7,6 @@
   "issue_tracker": "https://github.com/CrazzyBerg/upet-hass/issues",
   "iot_class": "cloud_polling",
   "requirements": [],
-  "version": "1.1.2+pfg.12",
+  "version": "1.1.2+pfg.13",
   "diagnostics": true
 }
