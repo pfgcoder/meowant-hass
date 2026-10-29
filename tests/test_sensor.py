@@ -74,7 +74,7 @@ def load_sensor_module():
             UnitOfMass=names(KILOGRAMS="kg"),
             UnitOfTime=names(MINUTES="min", SECONDS="s"),
         ),
-        "homeassistant.core": _module("homeassistant.core", HomeAssistant=object),
+        "homeassistant.core": _module("homeassistant.core", HomeAssistant=object, callback=lambda func: func),
         "homeassistant.helpers": _module("homeassistant.helpers"),
         "homeassistant.helpers.entity": _module("homeassistant.helpers.entity", EntityCategory=names(DIAGNOSTIC="diagnostic")),
         "homeassistant.helpers.device_registry": _module("homeassistant.helpers.device_registry", DeviceInfo=dict),
@@ -187,19 +187,54 @@ class LastUsedByTests(unittest.TestCase):
         self.assertIsNone(entity.native_value)
 
 
+def _set_up(cats: list[dict[str, Any]]):
+    """Set up the sensor platform; returns the coordinator, the entities added and its update listeners."""
+    import asyncio
+
+    listeners = []
+    coordinator = types.SimpleNamespace(
+        data={"devices": {"SN1": {}}, "cats": cats},
+        async_add_listener=lambda listener: listeners.append(listener) or (lambda: None),
+    )
+    hass = types.SimpleNamespace(data={"ubpet": {"entry": coordinator}})
+    entry = types.SimpleNamespace(entry_id="entry", async_on_unload=lambda unsubscribe: None)
+    added = []
+
+    asyncio.run(sensor.async_setup_entry(hass, entry, added.extend))
+    return coordinator, added, listeners
+
+
+def _cat_ids(entities) -> list[str]:
+    return [entity._cat_id for entity in entities if isinstance(entity, sensor.UbpetCatSensor)]
+
+
 class SetupTests(unittest.TestCase):
     def test_last_used_by_is_set_up_as_the_sensor_that_restores_its_cat(self):
-        import asyncio
-
-        coordinator = types.SimpleNamespace(data={"devices": {"SN1": {}}, "cats": []})
-        hass = types.SimpleNamespace(data={"ubpet": {"entry": coordinator}})
-        added = []
-
-        asyncio.run(sensor.async_setup_entry(hass, types.SimpleNamespace(entry_id="entry"), added.extend))
+        _, added, _ = _set_up([])
 
         classes = {entity.entity_description.key: type(entity) for entity in added}
         self.assertIs(classes["last_used_by"], sensor.UbpetLastUsedBySensor)
         self.assertIs(classes["visits_today"], sensor.UbpetDeviceSensor)
+
+    def test_adds_a_cats_sensors_once_when_the_cat_list_loads_after_setup(self):
+        # The cat list failed to load at setup, which leaves it empty.
+        coordinator, added, listeners = _set_up([])
+        self.assertEqual(_cat_ids(added), [])
+
+        coordinator.data = {"devices": {"SN1": {}}, "cats": [{"catInfoId": 532227, "nickname": "Tiny"}]}
+        for _update in range(2):
+            for listener in listeners:
+                listener()
+
+        self.assertEqual(_cat_ids(added), ["532227"] * len(sensor.CAT_SENSORS))
+
+    def test_cats_loaded_at_setup_are_not_added_again_on_updates(self):
+        _, added, listeners = _set_up([{"catInfoId": 532227, "nickname": "Tiny"}, {"nickname": "No ID"}])
+
+        for listener in listeners:
+            listener()
+
+        self.assertEqual(_cat_ids(added), ["532227"] * len(sensor.CAT_SENSORS))
 
 
 class TodayCountTests(unittest.TestCase):

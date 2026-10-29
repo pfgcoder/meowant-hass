@@ -7,7 +7,7 @@ from typing import Any, Callable
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfMass, UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -264,12 +264,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         for description in DEVICE_SENSORS:
             sensor_class = UbpetLastUsedBySensor if description.key == "last_used_by" else UbpetDeviceSensor
             entities.append(sensor_class(coordinator, entry.entry_id, serial, description))
-    for cat in coordinator.data.get("cats", []):
-        cat_id = cat.get("catInfoId")
-        if cat_id is None:
-            continue
-        entities.extend(UbpetCatSensor(coordinator, entry.entry_id, str(cat_id), description) for description in CAT_SENSORS)
     async_add_entities(entities)
+
+    # The cat list can fail to load while the rest of the account loads, so add each cat's sensors
+    # when the cat first shows up, not only at setup.
+    added_cats: set[str] = set()
+
+    @callback
+    def _add_new_cats() -> None:
+        cat_entities: list[SensorEntity] = []
+        for cat in coordinator.data.get("cats", []):
+            cat_id = cat.get("catInfoId")
+            if cat_id is None or str(cat_id) in added_cats:
+                continue
+            added_cats.add(str(cat_id))
+            cat_entities.extend(UbpetCatSensor(coordinator, entry.entry_id, str(cat_id), description) for description in CAT_SENSORS)
+        if cat_entities:
+            async_add_entities(cat_entities)
+
+    _add_new_cats()
+    entry.async_on_unload(coordinator.async_add_listener(_add_new_cats))
 
 
 class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEntity):
