@@ -182,6 +182,13 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.async_update_listeners()
 
     def start_mqtt_state_poll(self, serial: str, *, fast: bool = False) -> None:
+        if not self._mqtt_state_polls_enabled:
+            # Polls start 30 s after setup and stop after a refused login. A press before they start
+            # still wants the box's real state at once; after a refused login, asking would only try
+            # the password again.
+            if fast and not self._mqtt_state_polls_paused_for_auth:
+                self.hass.async_create_task(self.async_request_mqtt_state(serial))
+            return
         _LOGGER.info("Starting UPET MQTT state polling for %s fast=%s", serial, fast)
         self._schedule_mqtt_state_poll(serial, 0 if fast else self._mqtt_state_poll_delay(serial))
         self._ensure_mqtt_state_poll_task()
@@ -197,6 +204,8 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def cancel_mqtt_state_polls(self) -> None:
         self._mqtt_state_polls_enabled = False
+        # So an update still in flight when the entry unloads can't restart the polls.
+        self._mqtt_state_polls_paused_for_auth = False
         if self._mqtt_state_poll_task is not None:
             self._mqtt_state_poll_task.cancel()
             self._mqtt_state_poll_task = None

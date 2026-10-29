@@ -311,6 +311,48 @@ class RefusedLoginTests(unittest.TestCase):
         self.assertTrue(coordinator._mqtt_state_polls_enabled)
         self.assertIn("SN1", coordinator._next_mqtt_poll_at_by_serial)
 
+    def test_an_update_finishing_after_unload_leaves_the_polls_stopped(self):
+        import asyncio
+
+        coordinator_module = load_coordinator_module()
+
+        async def run_in_executor(func, *args):
+            return func(*args)
+
+        def create_task(coro):
+            raise AssertionError("no poll loop should start")
+
+        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor, async_create_task=create_task)
+        client = types.SimpleNamespace(get_dashboard=lambda: {"devices": {"SN1": _loaded_box()}, "cats": []})
+        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, client)
+        coordinator._pause_mqtt_state_polls_for_auth()
+
+        coordinator.cancel_mqtt_state_polls()
+        asyncio.run(coordinator._async_update_data())
+
+        self.assertFalse(coordinator._mqtt_state_polls_enabled)
+
+
+class FastPollTests(unittest.TestCase):
+    def setUp(self):
+        self.requested = []
+        coordinator_module = load_coordinator_module()
+        hass = types.SimpleNamespace(async_create_task=lambda request: None)
+        self.coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, None)
+        self.coordinator.async_request_mqtt_state = self.requested.append
+
+    def test_a_press_before_polls_start_asks_for_the_state_at_once(self):
+        self.coordinator.start_mqtt_state_poll("SN1", fast=True)
+
+        self.assertEqual(self.requested, ["SN1"])
+
+    def test_a_press_after_a_refused_login_asks_nothing(self):
+        self.coordinator._pause_mqtt_state_polls_for_auth()
+
+        self.coordinator.start_mqtt_state_poll("SN1", fast=True)
+
+        self.assertEqual(self.requested, [])
+
 
 if __name__ == "__main__":
     unittest.main()
