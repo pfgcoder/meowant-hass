@@ -44,6 +44,14 @@ QUICK_MQTT_REPLY_SERVICES = {
 # A day's worth of visits (about 15 a day with three cats) and of cleans (about 6), for the
 # today counts. Households with more cats can raise it in the integration's options.
 DEFAULT_RECORDS_PER_FETCH = 50
+# Login reply codes, as the Air Pet app words them. The account was found but the password was
+# refused: 2002 and 2006 "account or password incorrect", 2014 "password incorrect", 2342 "locked
+# for 10 minutes" after too many.
+WRONG_PASSWORD_CODES = frozenset({2002, 2006, 2014, 2342})
+# No account in the form tried: 2004 "user does not exist", 2010 and 2042 "account format
+# incorrect", 2011 bad phone number, 2019 bad email, and 1009 "parameter error", which an email
+# account gets for account type 2.
+NO_SUCH_ACCOUNT_CODES = frozenset({1009, 2004, 2010, 2011, 2019, 2042})
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -136,7 +144,7 @@ class UbpetClient:
 
     def _login_unlocked(self) -> UbpetAuth:
         last_error: UbpetApiError | None = None
-        refused = True
+        no_such_account = True
         for account_type in _account_type_candidates(self.account):
             try:
                 _LOGGER.info(
@@ -154,14 +162,18 @@ class UbpetClient:
                     account_type,
                     err,
                 )
+                code = _vendor_code(err)
+                if code in WRONG_PASSWORD_CODES:
+                    # Callers should ask for a new password: retrying this one, or trying it as
+                    # another account type, only counts towards the lock.
+                    raise UbpetAuthError(err.status, err.payload) from err
                 last_error = err
-                refused = refused and _is_login_refusal(err)
+                no_such_account = no_such_account and code in NO_SUCH_ACCOUNT_CODES
         if last_error is not None:
-            if refused:
-                # Every account type was answered and refused, so retrying the same password only
-                # risks a lockout; callers should ask for a new one. Anything else (a rate limit, an
-                # HTTP error, a reply without a token) may pass, so it stays an error to retry.
+            if no_such_account:
+                # No account type found the account, so retrying can't help either.
                 raise UbpetAuthError(last_error.status, last_error.payload) from last_error
+            # Anything else (a busy server, an HTTP error, a reply without a token) may pass.
             raise last_error
         raise RuntimeError("no account type candidates")
 
@@ -496,10 +508,8 @@ def _account_type_candidates(account: str) -> tuple[str, ...]:
     return ("0", "1", "2")
 
 
-def _is_login_refusal(err: UbpetApiError) -> bool:
-    """Whether the server answered the login normally but with an error code, as it does for an
-    unknown account (code 2004). A wrong password is taken to be refused the same way."""
-    return err.status == 200 and isinstance(err.payload, dict) and err.payload.get("code") not in (None, 0)
+def _vendor_code(err: UbpetApiError) -> Any:
+    return err.payload.get("code") if isinstance(err.payload, dict) else None
 
 
 def _decode_response(raw: bytes) -> Any:

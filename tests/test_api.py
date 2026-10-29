@@ -784,6 +784,29 @@ class ApiUnitTests(unittest.TestCase):
             client.login()
         self.assertEqual(tried, ["1", "0", "2"])
 
+    def test_login_with_no_such_account_in_any_form_is_an_auth_error(self):
+        client = self.make_client()
+        # What an unknown email account gets: not found as an email or a phone, a parameter error as type 2.
+        queued = [api.UbpetApiError(200, {"code": code}) for code in (2004, 2004, 1009)]
+        client._login_with_account_type = lambda account_type: (_ for _ in ()).throw(queued.pop(0))
+
+        with self.assertRaises(api.UbpetAuthError):
+            client.login()
+
+    def test_wrong_password_is_an_auth_error_without_trying_other_account_types(self):
+        for status, code in ((200, 2014), (200, 2002), (400, 2342)):
+            client = self.make_client()
+            tried = []
+
+            def refuse(account_type, status=status, code=code):
+                tried.append(account_type)
+                raise api.UbpetApiError(status, {"code": code})
+
+            client._login_with_account_type = refuse
+            with self.subTest(code=code), self.assertRaises(api.UbpetAuthError):
+                client.login()
+            self.assertEqual(tried, ["1"])
+
     def test_login_failing_on_a_server_error_is_not_an_auth_error(self):
         client = self.make_client()
         client._login_with_account_type = lambda account_type: (_ for _ in ()).throw(api.UbpetApiError(503, {}))
@@ -799,7 +822,9 @@ class ApiUnitTests(unittest.TestCase):
             [api.UbpetApiError(408, "timeout")] * 3,
             # A reply without a token.
             [api.UbpetApiError(200, {"code": 0, "data": {}})] * 3,
-            # Refused for two account types, but the third failed for another reason.
+            # A busy server answering normally with a code that isn't about the account.
+            [api.UbpetApiError(200, {"code": 9999, "message": "system busy"})] * 3,
+            # Not found for two account types, but the third failed for another reason.
             [api.UbpetApiError(200, {"code": 2004})] * 2 + [api.UbpetApiError(503, {})],
         ):
             client = self.make_client()
