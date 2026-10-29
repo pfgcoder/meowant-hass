@@ -187,6 +187,21 @@ class LastUsedByTests(unittest.TestCase):
         self.assertIsNone(entity.native_value)
 
 
+class SetupTests(unittest.TestCase):
+    def test_last_used_by_is_set_up_as_the_sensor_that_restores_its_cat(self):
+        import asyncio
+
+        coordinator = types.SimpleNamespace(data={"devices": {"SN1": {}}, "cats": []})
+        hass = types.SimpleNamespace(data={"ubpet": {"entry": coordinator}})
+        added = []
+
+        asyncio.run(sensor.async_setup_entry(hass, types.SimpleNamespace(entry_id="entry"), added.extend))
+
+        classes = {entity.entity_description.key: type(entity) for entity in added}
+        self.assertIs(classes["last_used_by"], sensor.UbpetLastUsedBySensor)
+        self.assertIs(classes["visits_today"], sensor.UbpetDeviceSensor)
+
+
 class TodayCountTests(unittest.TestCase):
     def test_counts_visits_since_local_midnight(self):
         item = {

@@ -102,9 +102,10 @@ use `custom_components/ubpet/secrets.py.example` as a template for a private
 If the vendor refuses the stored password (for example after it was changed in the app),
 or finds no such account, Home Assistant stops updating and asks for the current password
 under `Settings -> Devices & services`. It goes by the vendor's login codes, as the app
-does: 2002, 2006 and 2014 (wrong account or password), 2342 (locked for 10 minutes), and
-2004 (no such user). Other login failures, such as a rate limit or an outage, are retried
-at the next update instead.
+does: 2002, 2006 and 2014 (wrong account or password) or 2342 (locked for 10 minutes) from
+any account type the login tries, or a "no such account" code (1009, 2004, 2010, 2011, 2019
+or 2042) from every one of them. Other login failures, such as a rate limit or an outage,
+are retried at the next update instead.
 
 If one of the calls behind the sensors fails (the box's settings, use times, deodorant,
 online status, records or the cat list), its sensors keep their last values for up to an
@@ -198,8 +199,9 @@ Polling intervals:
 - `PAUSED`: every 10 seconds.
 - `PENDING`/standby/unknown: every 60 seconds.
 
-A state request ends as soon as the box replies. Sends go one at a time, since they share the
-MQTT client ID. If the broker refuses or hangs up on the cached MQTT login, the integration logs
+A state request ends as soon as the box replies, and a box's next one waits until the last has
+finished, so slow replies during an outage can't pile up. Sends go one at a time, since they
+share the MQTT client ID. If the broker refuses or hangs up on the cached MQTT login, the integration logs
 in to IM again and retries once; nothing has been published at that point, so a command is never
 sent twice. After a button press, Box status and the MQTT sensors show the expected state with a
 `guessed: true` attribute until the box replies.
@@ -268,8 +270,10 @@ The current tests cover:
 - Settings payload builders, and the auto clean guard.
 - IM credential/contact lookup, one send at a time, and retry.
 - MQTT codec, packet helpers, RISP/protobuf payload generation, and service ordinals.
-- Coordinator: reauth, MQTT state replies, guessed states, kept parts and outage logging.
-- Sensors: Last used by (and its restore), today counts, cat matching and attribute filtering.
+- Coordinator: reauth, MQTT state replies, one poll at a time, guessed states, kept parts and
+  outage logging.
+- Sensors: setup, Last used by (and its restore), today counts, cat matching and attribute
+  filtering.
 - Setup: unique ID migration and the records option.
 - Entity naming and translations.
 - Diagnostics redaction.
