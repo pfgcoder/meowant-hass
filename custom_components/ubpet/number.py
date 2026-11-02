@@ -33,6 +33,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     entities: list[NumberEntity] = []
     for serial in coordinator.data.get("devices", {}):
         entities.append(UbpetAutoCleanDelayNumber(coordinator, entry.entry_id, serial))
+        entities.append(UbpetBoxFullAlertNumber(coordinator, entry.entry_id, serial))
     async_add_entities(entities)
 
 
@@ -80,6 +81,57 @@ class UbpetAutoCleanDelayNumber(CoordinatorEntity[UbpetDataUpdateCoordinator], N
             minutes,
             auto_clean == 1,
         )
+        await self.coordinator.async_request_refresh()
+
+
+BOX_FULL_ALERT = NumberEntityDescription(
+    key="box_full_alert",
+    name="Waste bin full after",
+    icon="mdi:delete-alert-outline",
+    translation_key="box_full_alert",
+    native_min_value=1,
+    native_step=1,
+    native_unit_of_measurement="uses",
+    entity_category=EntityCategory.CONFIG,
+    mode=NumberMode.BOX,
+)
+
+
+class UbpetBoxFullAlertNumber(CoordinatorEntity[UbpetDataUpdateCoordinator], NumberEntity):
+    _attr_has_entity_name = True
+    entity_description = BOX_FULL_ALERT
+
+    def __init__(self, coordinator: UbpetDataUpdateCoordinator, entry_id: str, serial: str) -> None:
+        super().__init__(coordinator)
+        self._serial = serial
+        self._attr_unique_id = f"{entry_id}_{serial}_box_full_alert_threshold"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        item = self.coordinator.data.get("devices", {}).get(self._serial, {})
+        device = item.get("device", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._serial)},
+            manufacturer="Meowant",
+            name=device.get("deviceName") or self._serial,
+            serial_number=self._serial,
+        )
+
+    @property
+    def _use_times(self) -> dict[str, Any]:
+        return (self.coordinator.data.get("devices", {}).get(self._serial) or {}).get("box_use_times", {})
+
+    @property
+    def native_value(self) -> int | None:
+        return self._use_times.get("boxFullAlert")
+
+    @property
+    def native_max_value(self) -> float:
+        # The box reports how many uses its waste bin holds at most.
+        return float(self._use_times.get("boxFullMax") or 30)
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.hass.async_add_executor_job(self.coordinator.client.set_box_full_alert, self._serial, int(round(value)))
         await self.coordinator.async_request_refresh()
 
 

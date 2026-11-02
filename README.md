@@ -24,6 +24,9 @@ For safer use, create a separate UPET/Airrobo account and share litter box acces
   - Auto clean delay.
   - Auto clean on/off.
   - Deodorant alert.
+  - Child lock.
+  - Waste-bin full alert and its threshold.
+  - Shake mode and foreign object detection, on boxes that report them.
   - Empty waste-bin reminder switch, time, and weekdays.
   - Do not disturb schedule.
   - Light schedule.
@@ -131,7 +134,6 @@ Device sensors:
 - Waste-bin level.
 - Waste-bin last reset.
 - Box full max.
-- Box full alert.
 - Deodorant remaining days.
 - Auto clean delay.
 - Firmware version.
@@ -150,10 +152,12 @@ Device binary sensors:
 - Deodorant expired.
 - Sensor enabled.
 - Camera enabled.
-- Child lock.
 
 Device controls:
 
+- Child lock, waste bin full alert, and shake mode (on boxes that support it) switches.
+- Foreign object detection switch, on boxes that report the capability. The MW-SC02 doesn't.
+- Waste bin full threshold number, up to the bin's capacity the box reports.
 - Auto clean delay number.
 - Auto clean switch.
 - Deodorant alert switch.
@@ -168,6 +172,7 @@ Device buttons:
 - REST request.
 - MQTT request state.
 - Reset waste-bin counter.
+- Reset deodorant (after replacing the deodorant block).
 - Start clean.
 - Pause clean.
 - Resume clean.
@@ -175,7 +180,8 @@ Device buttons:
 - Pause flatten.
 - Resume flatten.
 - Raise litter rake.
-- Lower litter rake.
+- Lower litter rake. Available while the rake is up and the box is paused or blocked
+  (a hand or new litter on the scale shows as blocked), as in the app.
 
 Cat sensors:
 
@@ -240,8 +246,8 @@ Confirmed operation ordinals:
 
 - The integration depends on the vendor cloud and vendor IM/MQTT service.
 - Commands are confirmed by MQTT delivery/status responses, but full semantic validation of every receipt/error cause is not complete.
-- Control board / child lock is currently exposed as read-only because the observed API flow returns a permission error for writes.
-- Deodorize, direct light control, camera toggle, and full-alert threshold controls are not implemented yet.
+- The box only reports a changed setting once it applies it, so the child lock, waste-bin full alert, shake mode and foreign object detection switches show the new value at once and confirm it with a refresh 15 seconds later.
+- Deodorize, direct light control, and camera toggle are not implemented yet.
 
 ## Development
 
@@ -312,6 +318,4 @@ Planned or open work:
 
 - Decode more MQTT receipt/error causes and surface command failures more clearly.
 - Implement deodorize command if available.
-- Implement full-alert threshold setting.
-- Implement writable control board / child lock if a permitted API flow is found.
 - Add Home Assistant platform tests with `pytest-homeassistant-custom-component`.

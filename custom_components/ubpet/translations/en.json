@@ -95,9 +95,6 @@
       "box_full_max": {
         "name": "Box full max"
       },
-      "box_full_alert": {
-        "name": "Box full alert"
-      },
       "deodorant_remaining_days": {
         "name": "Deodorant remaining days"
       },
@@ -153,14 +150,14 @@
       },
       "camera_switch": {
         "name": "Camera enabled"
-      },
-      "control_board_switch": {
-        "name": "Child lock"
       }
     },
     "number": {
       "auto_clean_delay": {
         "name": "Auto clean delay"
+      },
+      "box_full_alert": {
+        "name": "Waste bin full after"
       }
     },
     "switch": {
@@ -178,6 +175,18 @@
       },
       "auto_clean": {
         "name": "Auto clean"
+      },
+      "child_lock": {
+        "name": "Child lock"
+      },
+      "foreign_object_detection": {
+        "name": "Foreign object detection"
+      },
+      "shake_mode": {
+        "name": "Shake mode"
+      },
+      "box_full_alert": {
+        "name": "Waste bin full alert"
       }
     },
     "time": {
@@ -208,6 +217,9 @@
       },
       "mqtt_request_state": {
         "name": "Request state"
+      },
+      "reset_deodorant": {
+        "name": "Reset deodorant"
       },
       "reset_waste_bin": {
         "name": "Reset waste bin"

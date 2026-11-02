@@ -53,14 +53,6 @@ BINARY_SENSORS: tuple[UbpetBinarySensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda item: item["config"].get("cameraSwitch") == 1,
     ),
-    UbpetBinarySensorDescription(
-        key="control_board_switch",
-        name="Child lock",
-        icon="mdi:lock",
-        translation_key="control_board_switch",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda item: item["config"].get("controlBoardSwitch") == 1,
-    ),
 )
 
 

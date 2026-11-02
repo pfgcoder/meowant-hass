@@ -124,15 +124,6 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         value_fn=lambda item: item["box_use_times"].get("boxFullMax"),
     ),
     UbpetSensorDescription(
-        key="box_full_alert",
-        name="Box full alert",
-        icon="mdi:alert-outline",
-        translation_key="box_full_alert",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda item: item["box_use_times"].get("boxFullAlert"),
-    ),
-    UbpetSensorDescription(
         key="deodorant_remaining_days",
         name="Deodorant remaining days",
         icon="mdi:air-filter",

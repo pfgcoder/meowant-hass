@@ -376,6 +376,25 @@ class UbpetClient:
         }
         self._request("PUT", "/catbox-server/box/config/switch/update", payload=payload, auth=True)
 
+    def set_function_switch(self, serial_number: str, function_type: int, enabled: bool) -> None:
+        """Toggle one of the box's on/off functions, as the app's settings page does.
+
+        function_type 0 is the child lock, 1 foreign object detection, 6 shake mode and
+        7 the waste-bin-full alert. Auto clean (2) carries the delay, so it has its own call.
+        """
+        # The app sends optionInt 1 for these; 0 is rejected as an invalid value.
+        payload = {"serialNumber": serial_number, "functionType": function_type, "controlSwitch": 1 if enabled else 0, "optionInt": 1}
+        self._request("PUT", "/catbox-server/box/config/switch/update", payload=payload, auth=True)
+
+    def set_box_full_alert(self, serial_number: str, uses: int) -> None:
+        """Set how many uses fill the waste bin before the bin-full alert."""
+        payload = {"serialNumber": serial_number, "boxFullAlertTimes": uses}
+        self._request("PUT", "/catbox-server/box/config/box-full-alert", payload=payload, auth=True)
+
+    def reset_deodorant(self, serial_number: str) -> None:
+        """Mark the deodorant block replaced, restarting its remaining-days countdown."""
+        self._request("POST", "/catbox-server/app/deodorant-block/replaced", payload={"serialNumber": serial_number}, auth=True)
+
     def set_deodorant_alert(self, serial_number: str, enabled: bool) -> None:
         payload = {
             "serialNumber": serial_number,
