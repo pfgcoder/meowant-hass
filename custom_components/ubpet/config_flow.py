@@ -273,7 +273,9 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception:
                 errors["base"] = "unknown"
             else:
-                return self.async_update_reload_and_abort(entry, data_updates={"password": password})
+                return self._async_save_and_reload(
+                    entry, reason="reauth_successful", data={**entry.data, "password": password}
+                )
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -336,8 +338,9 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors["base"] = "different_boxes"
                     else:
                         kept = {key: value for key, value in entry.data.items() if key not in _ACCOUNT_KEYS}
-                        return self.async_update_reload_and_abort(
+                        return self._async_save_and_reload(
                             entry,
+                            reason="reconfigure_successful",
                             unique_id=unique_id,
                             data={**kept, **_entry_data(profile, user_input, connection_data, country)},
                         )
@@ -358,6 +361,18 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"account": entry.data.get("account", "")},
             errors=errors,
         )
+
+    def _async_save_and_reload(self, entry, *, reason: str, **changes: Any):
+        """Save the new login and reload the entry so it logs in with it.
+
+        async_update_reload_and_abort leaves the reload to an entry's update listener from
+        HA 2026.12, and this entry's listener only applies options without a reload. So save
+        the change, then schedule the reload here. The reload runs even if nothing changed,
+        as after a refused login the entry has to try again.
+        """
+        self.hass.config_entries.async_update_entry(entry, **changes)
+        self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return self.async_abort(reason=reason)
 
     @staticmethod
     @callback

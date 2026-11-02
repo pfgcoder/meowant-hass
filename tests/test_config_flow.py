@@ -16,7 +16,11 @@ PACKAGE_NAME = "ubpet_config_flow_test"
 
 
 class _ConfigFlow:
-    """Just enough of ConfigFlow for the reconfigure step: each result is returned as a dict."""
+    """Just enough of ConfigFlow for the reauth and reconfigure steps: each result is a dict.
+
+    There's deliberately no async_update_reload_and_abort: from HA 2026.12 it doesn't reload an
+    entry with an update listener, so the flow mustn't use it.
+    """
 
     def __init_subclass__(cls, domain=None, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -27,11 +31,10 @@ class _ConfigFlow:
     def async_abort(self, *, reason):
         return {"type": "abort", "reason": reason}
 
-    def async_update_reload_and_abort(self, entry, **kwargs):
-        self.updated = (entry, kwargs)
-        return {"type": "abort", "reason": "reconfigure_successful"}
-
     def _get_reconfigure_entry(self):
+        return self.reconfigure_entry
+
+    def _get_reauth_entry(self):
         return self.reconfigure_entry
 
     def _async_current_entries(self, include_ignore=True):
@@ -94,10 +97,25 @@ def load_config_flow():
 config_flow = load_config_flow()
 
 
+class FakeConfigEntries:
+    """Records entry updates and reloads, in the order the flow makes them."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def async_update_entry(self, entry, **changes):
+        self.calls.append(("update", entry.entry_id, changes))
+        return True
+
+    def async_schedule_reload(self, entry_id):
+        self.calls.append(("reload", entry_id))
+
+
 class FakeHass:
     def __init__(self, coordinators: dict[str, Any]):
         self.data = {"ubpet": coordinators}
         self.config = types.SimpleNamespace(country="US")
+        self.config_entries = FakeConfigEntries()
 
     async def async_add_executor_job(self, func, *args):
         return func(*args)
@@ -142,6 +160,14 @@ def _submit(flow, user_input=OWNER, devices=({"serialNumber": "SN1"},), error: E
     return result, seen
 
 
+def _saved(flow) -> dict:
+    """The entry changes the flow saved, checking it then reloaded the same entry."""
+    calls = flow.hass.config_entries.calls
+    assert [call[0] for call in calls] == ["update", "reload"], calls
+    assert calls[0][1] == calls[1][1] == "entry", calls
+    return calls[0][2]
+
+
 class ReconfigureTests(unittest.TestCase):
     def test_the_form_starts_from_the_current_account(self):
         flow, _ = _flow()
@@ -154,13 +180,12 @@ class ReconfigureTests(unittest.TestCase):
         self.assertEqual(result["errors"], {})
 
     def test_an_account_that_sees_the_same_box_replaces_the_old_one(self):
-        flow, entry = _flow()
+        flow, _ = _flow()
 
         result, seen = _submit(flow)
 
         self.assertEqual(result, {"type": "abort", "reason": "reconfigure_successful"})
-        updated_entry, changes = flow.updated
-        self.assertIs(updated_entry, entry)
+        changes = _saved(flow)
         self.assertTrue(changes["unique_id"].endswith(":owner@example.com"))
         data = changes["data"]
         self.assertEqual(data["account"], "Owner@Example.com")
@@ -178,7 +203,7 @@ class ReconfigureTests(unittest.TestCase):
 
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["errors"], {"base": "different_boxes"})
-        self.assertFalse(hasattr(flow, "updated"))
+        self.assertEqual(flow.hass.config_entries.calls, [])
 
     def test_an_account_another_entry_uses_is_refused(self):
         flow, _ = _flow()
@@ -188,7 +213,7 @@ class ReconfigureTests(unittest.TestCase):
         result, _ = _submit(flow)
 
         self.assertEqual(result, {"type": "abort", "reason": "already_configured"})
-        self.assertFalse(hasattr(flow, "updated"))
+        self.assertEqual(flow.hass.config_entries.calls, [])
 
     def test_the_same_account_with_a_new_password_is_fine(self):
         flow, _ = _flow()
@@ -196,7 +221,7 @@ class ReconfigureTests(unittest.TestCase):
         result, _ = _submit(flow, user_input={"country": "US", "username": "shared@example.com", "password": "new"})
 
         self.assertEqual(result["reason"], "reconfigure_successful")
-        self.assertEqual(flow.updated[1]["data"]["password"], "new")
+        self.assertEqual(_saved(flow)["data"]["password"], "new")
 
     def test_a_refused_login_shows_auth_failed(self):
         flow, _ = _flow()
@@ -204,7 +229,7 @@ class ReconfigureTests(unittest.TestCase):
         result, _ = _submit(flow, error=config_flow.UbpetAuthError(200, {"code": 2002}))
 
         self.assertEqual(result["errors"], {"base": "auth_failed"})
-        self.assertFalse(hasattr(flow, "updated"))
+        self.assertEqual(flow.hass.config_entries.calls, [])
 
     def test_an_unreachable_server_shows_cannot_connect(self):
         flow, _ = _flow()
@@ -228,6 +253,74 @@ class ReconfigureTests(unittest.TestCase):
         result, _ = _submit(flow, devices=())
 
         self.assertEqual(result["reason"], "reconfigure_successful")
+
+
+class FakeLoginClient:
+    def __init__(self, data: dict, error: Exception | None):
+        self.data = data
+        self.error = error
+
+    def login(self):
+        if self.error is not None:
+            raise self.error
+
+
+def _log_in_again(flow, password="new-secret", error: Exception | None = None):
+    clients: list[FakeLoginClient] = []
+
+    def client_from_entry_data(data):
+        clients.append(FakeLoginClient(data, error))
+        return clients[-1]
+
+    with patch.object(config_flow, "client_from_entry_data", client_from_entry_data):
+        result = asyncio.run(flow.async_step_reauth_confirm({"password": password}))
+    return result, clients
+
+
+class LogInAgainTests(unittest.TestCase):
+    def test_a_working_password_is_saved_and_the_entry_reloads(self):
+        flow, _ = _flow()
+
+        result, clients = _log_in_again(flow)
+
+        self.assertEqual(result, {"type": "abort", "reason": "reauth_successful"})
+        self.assertEqual(clients[0].data["password"], "new-secret")
+        data = _saved(flow)["data"]
+        self.assertEqual(data["password"], "new-secret")
+        # Only the password changes.
+        self.assertEqual({k: v for k, v in data.items() if k != "password"}, {k: v for k, v in ENTRY_DATA.items() if k != "password"})
+
+    def test_the_same_password_again_still_reloads(self):
+        # After a refused login the entry has to try again, even if nothing in it changed.
+        flow, _ = _flow()
+
+        _log_in_again(flow, password="old-secret")
+
+        self.assertEqual(_saved(flow)["data"]["password"], "old-secret")
+
+    def test_a_refused_password_saves_nothing(self):
+        flow, _ = _flow()
+
+        result, _ = _log_in_again(flow, error=config_flow.UbpetAuthError(200, {"code": 2014}))
+
+        self.assertEqual(result["errors"], {"base": "auth_failed"})
+        self.assertEqual(flow.hass.config_entries.calls, [])
+
+    def test_an_unreachable_server_saves_nothing(self):
+        flow, _ = _flow()
+
+        result, _ = _log_in_again(flow, error=OSError("timed out"))
+
+        self.assertEqual(result["errors"], {"base": "cannot_connect"})
+        self.assertEqual(flow.hass.config_entries.calls, [])
+
+    def test_an_empty_password_asks_again(self):
+        flow, _ = _flow()
+
+        result, clients = _log_in_again(flow, password="  ")
+
+        self.assertEqual(result["errors"], {"base": "missing_required"})
+        self.assertEqual(clients, [])
 
 
 if __name__ == "__main__":
