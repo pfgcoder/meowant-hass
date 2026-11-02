@@ -11,13 +11,20 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import UbpetApiError, UbpetAuthError, UbpetClient
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, EVENT_BOX, EVENT_VISIT
 from .mqtt import STATE_FIELD_NAMES
+from .visits import new_visits, visit_event_data
 
 _LOGGER = logging.getLogger(__name__)
+
+# (records key in the dashboard, event to fire, cursor key suffix). Cat visits keep the bare
+# serial as their key, as in bojanrajkovic/upet-hass, so its stores would carry over.
+RECORD_STREAMS = (("cat_records", EVENT_VISIT, ""), ("device_records", EVENT_BOX, ":box"))
 
 # A state request now ends as soon as the box replies (about a second instead of a fixed 5 s
 # listen), so wait 5 s between polls while running to keep the old pace of one every ~6 s.
@@ -77,6 +84,10 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._parts_failing_since: dict[tuple[str, str], datetime] = {}
         # Boxes whose MQTT state polls are failing, logged at debug level after the first warning.
         self._mqtt_polls_failing: set[str] = set()
+        # The newest record reported per box and stream. Stored, so a restart neither drops nor
+        # replays visits.
+        self._record_store: Store[dict[str, int]] = Store(hass, 1, f"{DOMAIN}.{config_entry.entry_id}.visits")
+        self._record_cursor: dict[str, int] | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         started = time.monotonic()
@@ -103,6 +114,11 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             len(cats) if isinstance(cats, list) else 0,
         )
         self._last_rest_update_at = datetime.now(UTC)
+        if isinstance(devices, dict):
+            # Before the failed parts are filled in. A failed records fetch is still None here,
+            # which reports nothing; after the fill-in it could be an empty list, which on the
+            # first update would start the cursor at 0 and replay every visit as new.
+            await self._fire_new_records(devices)
         self._keep_failed_parts(data)
         data = self._with_mqtt_state(data)
         if self._mqtt_state_polls_paused_for_auth:
@@ -113,6 +129,52 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._ensure_mqtt_state_poll_task()
             self._ensure_mqtt_state_polls(data)
         return data
+
+    async def _fire_new_records(self, devices: dict[str, Any]) -> None:
+        """Fire an event for each record newer than the stored cursor (bojanrajkovic c7feb81, cc6b96b)."""
+        if self._record_cursor is None:
+            self._record_cursor = await self._record_store.async_load() or {}
+        changed = False
+        for serial, item in devices.items():
+            if not isinstance(item, dict):
+                continue
+            box_name = (item.get("device") or {}).get("deviceName")
+            for records_key, event, suffix in RECORD_STREAMS:
+                cursor_key = serial + suffix
+                batch = new_visits(item.get(records_key), self._record_cursor.get(cursor_key))
+                for record in batch.visits:
+                    event_data = visit_event_data(serial, box_name, record)
+                    self.hass.bus.async_fire(event, {**event_data, **self._logbook_links(serial, event_data["cat_id"])})
+                if batch.last_record_id is not None and batch.last_record_id != self._record_cursor.get(cursor_key):
+                    self._record_cursor[cursor_key] = batch.last_record_id
+                    changed = True
+                if batch.visits:
+                    _LOGGER.info("UPET reported %s new %s for %s", len(batch.visits), records_key, serial)
+        if changed:
+            await self._record_store.async_save(self._record_cursor)
+
+    def _logbook_links(self, serial: str, cat_id: Any) -> dict[str, str]:
+        """Link a record to the cat's device and the box's Last used by sensor.
+
+        Device pages list logbook entries whose event data names the device or one of its
+        entities, but the logbook skips continuous entities (anything with a unit or a state
+        class). The cat's device puts a visit on the cat's page; the box's Last used by sensor,
+        plain text, puts it on the box's page. An unmatched visit names the box's device.
+        """
+        devices = dr.async_get(self.hass)
+        links: dict[str, str] = {}
+        cat_device = devices.async_get_device(identifiers={(DOMAIN, f"cat_{cat_id}")}) if cat_id is not None else None
+        if device := cat_device or devices.async_get_device(identifiers={(DOMAIN, serial)}):
+            links["device_id"] = device.id
+        unique_id = f"{self.config_entry.entry_id}_{serial}_last_used_by"
+        if entity_id := er.async_get(self.hass).async_get_entity_id("sensor", DOMAIN, unique_id):
+            links["entity_id"] = entity_id
+        return links
+
+    @property
+    def every_part_loaded(self) -> bool:
+        """True when the last update loaded every part, so what it lacks is really gone."""
+        return not self._parts_failing_since
 
     def _keep_failed_parts(self, data: dict[str, Any]) -> None:
         """Fill in the parts that failed to load, so one failed call doesn't drop sensors to unknown

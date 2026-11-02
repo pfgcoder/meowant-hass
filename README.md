@@ -198,6 +198,60 @@ Cat sensors:
 Cat picture URLs are exposed as cat entity attributes when returned by the vendor API. They
 are left out of the recorder's history.
 
+## Visit Log
+
+Each update reads each box's latest visit and clean records (`Records per fetch`,
+50 by default). Every visit record newer than the last one seen fires a `ubpet_visit`
+event and shows in the Logbook as "Tiny used Meowant SC03 Litter Box (6.7 kg, 58 s)",
+on the cat's device page and the box's. Box records, such as a finished clean
+(`event_type` 31), fire `ubpet_box_event` the same way, with empty cat fields.
+Ported from [bojanrajkovic/upet-hass](https://github.com/bojanrajkovic/upet-hass).
+
+Event data:
+
+| Field | Meaning |
+| --- | --- |
+| `serial_number`, `box` | Which box |
+| `record_id` | Vendor record id, unique and increasing |
+| `cat_id`, `cat` | Identified cat, or `null` for an unmatched visit |
+| `weight_kg`, `duration_s` | Weight measured and time spent |
+| `event_type` | Vendor code: `3` matched cat, `21` unmatched, `31` clean finished |
+| `time` | Visit time, ISO 8601 UTC |
+| `device_id`, `entity_id` | The cat's device (the box's, for an unmatched visit) and the box's Last used by sensor, so the visit shows on both device pages |
+
+The event reflects the cat known when the visit first appears. Matching a visit to a
+cat later in the app doesn't fire a new event.
+
+The last reported record id is stored per box, so a restart neither drops nor replays
+visits. Adding the integration doesn't replay past visits, and a box paired later has
+its first record reported. A failed records fetch reports nothing until it works again.
+More visits on one box between two updates than `Records per fetch` (a long outage)
+loses the oldest ones.
+
+The recorder purges events after `purge_keep_days` (10 by default). To keep a
+permanent CSV, point an automation at a [File](https://www.home-assistant.io/integrations/file/)
+notify entity (`notify.litter_log` here):
+
+```yaml
+automation:
+  - alias: Log litter box visits
+    triggers:
+      - trigger: event
+        event_type: ubpet_visit
+    actions:
+      - action: notify.send_message
+        target:
+          entity_id: notify.litter_log
+        data:
+          message: >-
+            {{ trigger.event.data.time }},{{ trigger.event.data.box }},
+            {{ trigger.event.data.cat or 'unmatched' }},{{ trigger.event.data.weight_kg }},
+            {{ trigger.event.data.duration_s }}
+```
+
+A box or cat the account no longer reports (after re-pairing a box or recreating a
+cat profile) can be deleted from its device page, once an update has loaded everything.
+
 ## MQTT Behavior
 
 Work commands are sent through the vendor IM/MQTT path, not REST.

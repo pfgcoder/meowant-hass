@@ -27,6 +27,8 @@ def _module(name: str, **attrs) -> types.ModuleType:
 
 def load_init_module():
     """Load the integration's __init__.py against stand-ins for Home Assistant, removed once loaded."""
+    device_registry = _module("homeassistant.helpers.device_registry", DeviceEntry=object, async_get=None)
+    entity_registry = _module("homeassistant.helpers.entity_registry", async_get=None)
     stubs = {
         "homeassistant": _module("homeassistant"),
         "homeassistant.config_entries": _module("homeassistant.config_entries", ConfigEntry=object),
@@ -40,7 +42,12 @@ def load_init_module():
         ),
         "homeassistant.core": _module("homeassistant.core", HomeAssistant=object, callback=lambda func: func),
         "homeassistant.exceptions": _module("homeassistant.exceptions", ConfigEntryAuthFailed=Exception),
-        "homeassistant.helpers": _module("homeassistant.helpers"),
+        "homeassistant.helpers": _module(
+            "homeassistant.helpers", device_registry=device_registry, entity_registry=entity_registry
+        ),
+        "homeassistant.helpers.device_registry": device_registry,
+        "homeassistant.helpers.entity_registry": entity_registry,
+        "homeassistant.helpers.storage": _module("homeassistant.helpers.storage", Store=object),
         "homeassistant.helpers.event": _module("homeassistant.helpers.event", async_call_later=None),
         "homeassistant.helpers.update_coordinator": _module(
             "homeassistant.helpers.update_coordinator",
@@ -132,6 +139,32 @@ class RecordsPerFetchTests(unittest.TestCase):
 
         self.assertEqual(coordinator.client.records_per_fetch, 100)
         self.assertEqual(refreshed, [True])
+
+
+class StaleDeviceTests(unittest.TestCase):
+    """Ported from bojanrajkovic/upet-hass (ed43881), stricter about failed loads."""
+
+    DATA = {"devices": {"SN1": {}}, "cats": [{"catInfoId": 5}]}
+
+    def can_remove(self, identifiers, *, loaded=True, success=True, data=DATA):
+        import asyncio
+
+        coordinator = types.SimpleNamespace(data=data, last_update_success=success, every_part_loaded=loaded)
+        hass = types.SimpleNamespace(data={integration.DOMAIN: {"entry": coordinator}})
+        device = types.SimpleNamespace(identifiers=identifiers)
+        return asyncio.run(integration.async_remove_config_entry_device(hass, _entry("entry", "app:a"), device))
+
+    def test_a_box_or_cat_the_account_still_reports_stays(self):
+        self.assertFalse(self.can_remove({("ubpet", "SN1")}))
+        self.assertFalse(self.can_remove({("ubpet", "cat_5")}))
+
+    def test_a_cat_from_before_a_re_pair_can_go(self):
+        self.assertTrue(self.can_remove({("ubpet", "cat_4")}))
+
+    def test_nothing_goes_while_a_part_failed_to_load(self):
+        # A cat list that failed to load would otherwise make every cat look gone.
+        self.assertFalse(self.can_remove({("ubpet", "cat_5")}, loaded=False, data={"devices": {"SN1": {}}, "cats": []}))
+        self.assertFalse(self.can_remove({("ubpet", "cat_4")}, success=False))
 
 
 if __name__ == "__main__":

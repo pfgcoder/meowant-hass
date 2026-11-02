@@ -31,13 +31,53 @@ def _module(name: str, **attrs) -> types.ModuleType:
     return module
 
 
+# What each storage key holds, shared by every Store, so a new coordinator reads what the last saved.
+STORED: dict[str, dict] = {}
+
+
+class _Store:
+    def __init__(self, hass, version, key):
+        self.key = key
+
+    async def async_load(self):
+        return dict(STORED[self.key]) if self.key in STORED else None
+
+    async def async_save(self, data):
+        STORED[self.key] = dict(data)
+
+
+class _Registry:
+    """Device and entity registry stand-in: known devices by identifier, entities by unique ID."""
+
+    def __init__(self, devices=None, entities=None):
+        self.devices = devices or {}
+        self.entities = entities or {}
+
+    def async_get_device(self, *, identifiers):
+        return next((self.devices[i] for i in identifiers if i in self.devices), None)
+
+    def async_get_entity_id(self, domain, platform, unique_id):
+        return self.entities.get((domain, platform, unique_id))
+
+
 def load_coordinator_module():
     """Load coordinator.py against stand-ins for Home Assistant and api.py, removed once loaded."""
     package = _module(PACKAGE_NAME, __path__=[str(COMPONENT_PATH)])
     api_error = type("UbpetApiError", (RuntimeError,), {})
+    device_registry = _module(
+        "homeassistant.helpers.device_registry", async_get=lambda hass: getattr(hass, "device_registry", _Registry())
+    )
+    entity_registry = _module(
+        "homeassistant.helpers.entity_registry", async_get=lambda hass: getattr(hass, "entity_registry", _Registry())
+    )
     stubs = {
         "homeassistant": _module("homeassistant"),
-        "homeassistant.helpers": _module("homeassistant.helpers"),
+        "homeassistant.helpers": _module(
+            "homeassistant.helpers", device_registry=device_registry, entity_registry=entity_registry
+        ),
+        "homeassistant.helpers.device_registry": device_registry,
+        "homeassistant.helpers.entity_registry": entity_registry,
+        "homeassistant.helpers.storage": _module("homeassistant.helpers.storage", Store=_Store),
         "homeassistant.config_entries": _module("homeassistant.config_entries", ConfigEntry=object),
         "homeassistant.core": _module("homeassistant.core", HomeAssistant=object),
         "homeassistant.helpers.update_coordinator": _module(
@@ -56,7 +96,11 @@ def load_coordinator_module():
             UbpetClient=object,
         ),
         f"{PACKAGE_NAME}.const": _module(
-            f"{PACKAGE_NAME}.const", DEFAULT_SCAN_INTERVAL=timedelta(minutes=3), DOMAIN="ubpet"
+            f"{PACKAGE_NAME}.const",
+            DEFAULT_SCAN_INTERVAL=timedelta(minutes=3),
+            DOMAIN="ubpet",
+            EVENT_VISIT="ubpet_visit",
+            EVENT_BOX="ubpet_box_event",
         ),
     }
     spec = importlib.util.spec_from_file_location(f"{PACKAGE_NAME}.coordinator", COMPONENT_PATH / "coordinator.py")
@@ -121,7 +165,9 @@ class MqttStateReplyTests(unittest.TestCase):
 
 def _entry(create_task=None):
     """A config entry that hands the coroutines of its background tasks to create_task."""
-    return types.SimpleNamespace(async_create_background_task=lambda hass, target, name: create_task(target))
+    return types.SimpleNamespace(
+        entry_id="entry", async_create_background_task=lambda hass, target, name: create_task(target)
+    )
 
 
 def _loaded_box(**parts) -> dict:
@@ -183,6 +229,114 @@ class FailedPartsTests(unittest.TestCase):
             ["WARNING", "INFO"],
         )
         self.assertNotIn(("SN1", "cat_records"), self.coordinator._parts_failing_since)
+
+
+def _visit(record_id: int, cat_id: int = 5, cat: str | None = "Tiny", event_type: int = 3) -> dict:
+    return {
+        "recordId": record_id,
+        "eventTime": 1793600000000,
+        "eventType": event_type,
+        "catInfoId": cat_id,
+        "catNickname": cat,
+        "weight": 6.7,
+        "costTime": 58,
+    }
+
+
+class RecordEventTests(unittest.TestCase):
+    """Ported from bojanrajkovic/upet-hass (c7feb81, cc6b96b, 4f74dcb, 167c42b)."""
+
+    def setUp(self):
+        STORED.clear()
+        self.module = load_coordinator_module()
+        self.fired: list[tuple[str, dict]] = []
+        self.hass = types.SimpleNamespace(
+            bus=types.SimpleNamespace(async_fire=lambda event, data: self.fired.append((event, data))),
+            device_registry=_Registry(
+                devices={("ubpet", "cat_5"): types.SimpleNamespace(id="tiny-device"), ("ubpet", "SN1"): types.SimpleNamespace(id="box-device")}
+            ),
+            entity_registry=_Registry(
+                entities={("sensor", "ubpet", "entry_SN1_last_used_by"): "sensor.meowant_sc03_litter_box_last_used_by"}
+            ),
+        )
+
+    def coordinator(self):
+        return self.module.UbpetDataUpdateCoordinator(self.hass, _entry(), None)
+
+    def fire(self, coordinator, **parts):
+        import asyncio
+
+        asyncio.run(coordinator._fire_new_records({"SN1": _loaded_box(device={"deviceName": "Litter Box"}, **parts)}))
+
+    def test_the_first_update_starts_the_cursor_without_replaying_history(self):
+        self.fire(self.coordinator(), cat_records=[_visit(11), _visit(10)], device_records=[_visit(20, cat_id=0, cat=None, event_type=31)])
+
+        self.assertEqual(self.fired, [])
+        self.assertEqual(STORED["ubpet.entry.visits"], {"SN1": 11, "SN1:box": 20})
+
+    def test_a_new_visit_fires_once_linked_to_the_cat_and_the_box(self):
+        coordinator = self.coordinator()
+        self.fire(coordinator, cat_records=[_visit(10)])
+
+        self.fire(coordinator, cat_records=[_visit(11), _visit(10)])
+        self.fire(coordinator, cat_records=[_visit(11), _visit(10)])
+
+        self.assertEqual(len(self.fired), 1)
+        event, data = self.fired[0]
+        self.assertEqual(event, "ubpet_visit")
+        self.assertEqual((data["record_id"], data["cat"], data["box"], data["weight_kg"]), (11, "Tiny", "Litter Box", 6.7))
+        self.assertEqual(data["device_id"], "tiny-device")
+        self.assertEqual(data["entity_id"], "sensor.meowant_sc03_litter_box_last_used_by")
+
+    def test_an_unmatched_visit_links_to_the_box(self):
+        coordinator = self.coordinator()
+        self.fire(coordinator, cat_records=[_visit(10)])
+
+        self.fire(coordinator, cat_records=[_visit(11, cat_id=0, cat=None, event_type=21), _visit(10)])
+
+        data = self.fired[0][1]
+        self.assertIsNone(data["cat_id"])
+        self.assertEqual(data["device_id"], "box-device")
+
+    def test_a_finished_clean_fires_a_box_event(self):
+        coordinator = self.coordinator()
+        self.fire(coordinator, device_records=[_visit(20, cat_id=0, cat=None, event_type=31)])
+
+        self.fire(coordinator, device_records=[_visit(21, cat_id=0, cat=None, event_type=31), _visit(20, cat_id=0, cat=None, event_type=31)])
+
+        self.assertEqual([(event, data["record_id"]) for event, data in self.fired], [("ubpet_box_event", 21)])
+
+    def test_a_failed_first_fetch_neither_starts_the_cursor_nor_replays_later(self):
+        coordinator = self.coordinator()
+        self.fire(coordinator, cat_records=None)
+        self.assertNotIn("SN1", STORED.get("ubpet.entry.visits", {}))
+
+        self.fire(coordinator, cat_records=[_visit(11), _visit(10)])
+
+        self.assertEqual(self.fired, [])
+        self.assertEqual(STORED["ubpet.entry.visits"]["SN1"], 11)
+
+    def test_a_restart_neither_drops_nor_replays_visits(self):
+        self.fire(self.coordinator(), cat_records=[_visit(10)])
+
+        restarted = self.coordinator()
+        self.fire(restarted, cat_records=[_visit(12), _visit(11), _visit(10)])
+
+        self.assertEqual([data["record_id"] for _, data in self.fired], [11, 12])
+
+    def test_the_update_fires_records_before_filling_in_failed_parts(self):
+        # An empty kept-over list would otherwise start a fresh cursor at 0 and replay everything.
+        import asyncio
+
+        coordinator = self.coordinator()
+        coordinator.client = types.SimpleNamespace(
+            get_dashboard=lambda: {"devices": {"SN1": _loaded_box(cat_records=None)}, "cats": []}
+        )
+        self.hass.async_add_executor_job = lambda func, *args: asyncio.sleep(0, result=func(*args))
+        with self.assertLogs(self.module._LOGGER, "WARNING"):
+            asyncio.run(coordinator._async_update_data())
+
+        self.assertNotIn("SN1", STORED.get("ubpet.entry.visits", {}))
 
 
 class MqttPollFailureLogTests(unittest.TestCase):
@@ -427,7 +581,7 @@ class BackgroundTaskTests(unittest.TestCase):
 
         coordinator = module.UbpetDataUpdateCoordinator(
             types.SimpleNamespace(async_create_task=create_task),
-            types.SimpleNamespace(async_create_background_task=create_background_task),
+            types.SimpleNamespace(entry_id="entry", async_create_background_task=create_background_task),
             None,
         )
         coordinator.data = {"devices": {"SN1": {}}}

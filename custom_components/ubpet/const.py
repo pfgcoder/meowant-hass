@@ -8,6 +8,9 @@ from .profiles import UPET_BASE_URL
 
 DOMAIN = "ubpet"
 DEFAULT_SCAN_INTERVAL = timedelta(minutes=3)
+# Fired once per new record: a cat's visit, or a box record such as a finished clean.
+EVENT_VISIT = f"{DOMAIN}_visit"
+EVENT_BOX = f"{DOMAIN}_box_event"
 
 try:
     from .secrets import (

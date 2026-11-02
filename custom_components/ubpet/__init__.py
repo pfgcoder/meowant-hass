@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.event import async_call_later
 
 from .api import DEFAULT_RECORDS_PER_FETCH, UbpetClient
@@ -30,6 +31,7 @@ from .const import (
 )
 from .coordinator import UbpetDataUpdateCoordinator
 from .profiles import PROFILE_UPET, get_profile
+from .registry import still_reported
 
 _LOGGER = logging.getLogger(__name__)
 MQTT_POLL_START_DELAY_SECONDS = 30
@@ -113,6 +115,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if coordinator is not None:
             coordinator.cancel_mqtt_state_polls()
     return unload_ok
+
+
+async def async_remove_config_entry_device(hass: HomeAssistant, entry: ConfigEntry, device: DeviceEntry) -> bool:
+    """Let a box or cat the account no longer reports be deleted, such as one from before a re-pair.
+
+    Ported from bojanrajkovic/upet-hass (ed43881). Only after an update that loaded every part:
+    a cat list that failed to load would otherwise make every cat look gone.
+    """
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is None or not coordinator.last_update_success or not coordinator.every_part_loaded:
+        return False
+    return not still_reported(device.identifiers, coordinator.data or {})
 
 
 def client_from_entry_data(data: Mapping[str, Any], options: Mapping[str, Any] | None = None) -> UbpetClient:
