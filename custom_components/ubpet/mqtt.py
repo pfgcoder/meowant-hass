@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import random
-import socket
-import ssl
 import time
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 
 MESSAGE_PROTOCOL_VERSION = "1.0.1"
 ANY_BYTES_VALUE_TYPE_URL = "type.googleapis.com/google.protobuf.BytesValue"
 ANY_RECEIPT_NOTIFICATION_TYPE_URL = "type.googleapis.com/rosa.im.protobuf.ReceiptNotification"
+ANY_ONLINE_STATUS_TYPE_URL = "type.googleapis.com/rosa.im.protobuf.OnlineStatusNotification"
+ANY_FORCE_OFFLINE_TYPE_URL = "type.googleapis.com/rosa.im.protobuf.ForceOfflineNotification"
 DEFAULT_MQTT_PORT = 21000
 DEFAULT_MQTT_KEEPALIVE = 20
 RISP_SEQ_MAX = 0x7FFF
@@ -21,6 +21,12 @@ RISP_DEV_AIRPET = 0x02
 RISP_CMD_OPERATION = 0x3FB
 RISP_CMD_ALL_STATE = 0x3FD
 RISP_CMD_ALL_STATE_RESPONSE = 0x3FD
+# Unsolicited pushes from the box (bojanrajkovic/upet-hass ae7233b, b0edf9b): a new visit or
+# device record, a work-state change, and the box asking the cloud for its settings, which it
+# does after any settings change (d2c2535_intelligent_dev_config_info_get_rq).
+RISP_CMD_RECORD_PUSH = 0x3FF
+RISP_CMD_STATE_PUSH = 0x400
+RISP_CMD_CONFIG_REQUEST = 0x9E7
 RISP_ATTR_REQUEST = 1
 RISP_HEADER_FIELD_NAMES = {
     1: "dev",
@@ -109,10 +115,6 @@ WORK_TYPE_TO_OP_MODE = {
 WORK_ACTION_TO_OP_STATE = {
     "start": "start",
 }
-
-
-class MqttConnectError(RuntimeError):
-    """The broker turned down the connection or subscription, before anything was published."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,257 +416,73 @@ def mqtt_host_from_base_url(base_url: str) -> str:
     return base_url.replace("https://", "").replace("http://", "").strip("/")
 
 
-def mqtt_endpoint(base_url: str, credentials: dict[str, Any], default_port: int = DEFAULT_MQTT_PORT) -> tuple[str, int, str]:
-    # The Android command path builds MQTT host from the regional API base URL.
-    # IM login may return a url field on newer servers, but the app's MqttInfoBean
-    # does not use it for the litterbox command connection.
-    return mqtt_host_from_base_url(base_url), default_port, "base_url"
+@dataclass(frozen=True, slots=True)
+class Kicked:
+    """Another login on the account took over this IM session."""
 
 
-def mqtt_connect_payload(*, client_id: str, username: str, password: str, keepalive: int = DEFAULT_MQTT_KEEPALIVE) -> bytes:
-    variable_header = b"".join(
-        [
-            mqtt_utf8("MQTT"),
-            b"\x04",
-            b"\xc2",
-            int(keepalive).to_bytes(2, "big"),
-        ]
-    )
-    return variable_header + mqtt_utf8(client_id) + mqtt_utf8(username) + mqtt_utf8(password)
+@dataclass(frozen=True, slots=True)
+class StatePush:
+    serial: str
+    state: dict[str, Any]
 
 
-def mqtt_subscribe_payload(*, packet_id: int, topic: str, qos: int = 1) -> bytes:
-    return packet_id.to_bytes(2, "big") + mqtt_utf8(topic) + bytes([qos])
+@dataclass(frozen=True, slots=True)
+class NewRecord:
+    """The box wrote a visit or device record; fetch it over REST."""
+
+    serial: str
 
 
-def mqtt_publish_payload(*, topic: str, payload: bytes) -> bytes:
-    return mqtt_utf8(topic) + payload
+@dataclass(frozen=True, slots=True)
+class ConfigChanged:
+    """The box picked up a settings change, from the app, the box itself, or the integration."""
+
+    serial: str
 
 
-def recv_exact(conn: Any, length: int) -> bytes:
-    out = bytearray()
-    while len(out) < length:
-        chunk = conn.recv(length - len(out))
-        if not chunk:
-            raise RuntimeError("MQTT socket closed")
-        out += chunk
-    return bytes(out)
+@dataclass(frozen=True, slots=True)
+class OnlineChange:
+    serial: str
+    online: bool
 
 
-def read_mqtt_packet(conn: Any, timeout: float) -> tuple[int, int, bytes] | None:
-    conn.settimeout(max(timeout, 0.001))
-    try:
-        first = conn.recv(1)
-    except socket.timeout:
-        return None
-    if not first:
-        raise RuntimeError("MQTT socket closed")
-
-    multiplier = 1
-    remaining = 0
-    while True:
-        digit = recv_exact(conn, 1)[0]
-        remaining += (digit & 0x7F) * multiplier
-        if not (digit & 0x80):
-            break
-        multiplier *= 128
-        if multiplier > 128 * 128 * 128:
-            raise RuntimeError("malformed MQTT remaining length")
-
-    payload = recv_exact(conn, remaining) if remaining else b""
-    return first[0] >> 4, first[0] & 0x0F, payload
+@dataclass(frozen=True, slots=True)
+class Ignored:
+    reason: str
 
 
-def publish_service_on_connection(
-    conn: Any,
-    *,
-    credentials: dict[str, Any],
-    target_uid: str,
-    from_uid: str | None = None,
-    service_id: str,
-    seq: int | None,
-    timeout: float,
-    listen_seconds: float = 5,
-    stop_on_state_reply: bool = False,
-) -> PayloadParts:
-    client_id = _first_text(credentials, "clientId", "client_id")
-    username = _first_text(credentials, "mqttUserName", "userName", "username")
-    password = _first_text(credentials, "mqttPassword", "password")
-    pub_topic = _first_text(credentials, "pubTopic", "pub_topic")
-    sub_topic = _first_text(credentials, "subTopic", "sub_topic")
-    account_uid = from_uid or _first_text(credentials, "uid", "userId", "imUserId", "accountUid")
-
-    conn.sendall(mqtt_packet(0x10, mqtt_connect_payload(client_id=client_id, username=username, password=password)))
-    connack = _read_broker_answer(conn, timeout, "CONNECT")
-    if connack[0] != 2 or connack[2] != b"\x00\x00":
-        raise MqttConnectError("MQTT CONNECT refused")
-
-    conn.sendall(mqtt_packet(0x82, mqtt_subscribe_payload(packet_id=1, topic=sub_topic, qos=1)))
-    suback = _read_broker_answer(conn, timeout, "SUBSCRIBE")
-    # A SUBACK holds the packet ID, then the granted QoS, or 0x80 for a refused subscription.
-    if suback[0] != 9 or suback[2][2:3] == b"\x80":
-        raise MqttConnectError("MQTT SUBSCRIBE refused")
-
-    parts = resolve_service_payload(
-        service_id,
-        seq=seq,
-        from_uid=account_uid,
-        to_uid=target_uid,
-        gid=generate_gid(),
-    )
-    if parts.im_message is None:
-        raise RuntimeError("MQTT command payload was not built")
-    conn.sendall(mqtt_packet(0x30, mqtt_publish_payload(topic=pub_topic, payload=parts.im_message)))
-    received_messages = collect_mqtt_messages(
-        conn,
-        timeout=timeout,
-        listen_seconds=float(listen_seconds),
-        phase="command",
-        stop_when=(lambda decoded: _is_state_reply_from(decoded, target_uid)) if stop_on_state_reply else None,
-    )
-    conn.sendall(mqtt_packet(0xE0, b""))
-    return PayloadParts(
-        op_body=parts.op_body,
-        risp_frame=parts.risp_frame,
-        command_proto=parts.command_proto,
-        im_message=parts.im_message,
-        cid=parts.cid,
-        gid=parts.gid,
-        created_at_ms=parts.created_at_ms,
-        seq=parts.seq,
-        dev=parts.dev,
-        cmd=parts.cmd,
-        received_messages=tuple(received_messages),
-    )
+PushMessage = Kicked | StatePush | NewRecord | ConfigChanged | OnlineChange | Ignored
 
 
-def _read_broker_answer(conn: Any, timeout: float, request: str) -> tuple[int, int, bytes]:
-    """The broker's answer to CONNECT or SUBSCRIBE.
+def classify_push(decoded: dict[str, Any], uid_to_serial: dict[str, str]) -> PushMessage:
+    """Decide what a decoded IM message means for the integration (bojanrajkovic/upet-hass 57ef90e).
 
-    A broker may turn a login away by hanging up instead of answering, so that's a MqttConnectError
-    like a refusal. No answer in time is a slow broker, not a refusal, and stays a plain error.
+    `uid_to_serial` maps each box's IM user id to its serial number. Messages from anything
+    else, such as command receipts, are ignored, so only a known box can set a box's state.
     """
-    try:
-        packet = read_mqtt_packet(conn, timeout)
-    except TimeoutError:
-        raise
-    except (OSError, RuntimeError) as err:
-        raise MqttConnectError(f"MQTT {request} refused: {err}") from err
-    if packet is None:
-        raise RuntimeError(f"MQTT {request} timed out")
-    return packet
-
-
-def publish_service(
-    *,
-    base_url: str,
-    credentials: dict[str, Any],
-    target_uid: str,
-    from_uid: str | None = None,
-    service_id: str,
-    seq: int | None,
-    port: int = DEFAULT_MQTT_PORT,
-    timeout: float = 10,
-    listen_seconds: float = 5,
-    stop_on_state_reply: bool = False,
-) -> PayloadParts:
-    host, endpoint_port, _source = mqtt_endpoint(base_url, credentials, port)
-    raw_sock = socket.create_connection((host, endpoint_port), timeout=timeout)
-    try:
-        context = ssl.create_default_context()
-        with context.wrap_socket(raw_sock, server_hostname=host) as conn:
-            return publish_service_on_connection(
-                conn,
-                credentials=credentials,
-                target_uid=target_uid,
-                from_uid=from_uid,
-                service_id=service_id,
-                seq=seq,
-                timeout=timeout,
-                listen_seconds=listen_seconds,
-                stop_on_state_reply=stop_on_state_reply,
-            )
-    finally:
-        raw_sock.close()
-
-
-def _is_state_reply_from(decoded: Any, uid: str) -> bool:
-    return isinstance(decoded, dict) and decoded.get("risp_cmd") == 1021 and str(decoded.get("from_uid")) == str(uid)
-
-
-def _first_text(payload: dict[str, Any], *keys: str) -> str:
-    value = _first_optional_text(payload, *keys)
-    if value is not None:
-        return value
-    raise RuntimeError(f"missing MQTT credential field: {'/'.join(keys)}")
-
-
-def _first_optional_text(payload: dict[str, Any], *keys: str) -> str | None:
-    for key in keys:
-        value = payload.get(key)
-        if value not in (None, ""):
-            return str(value)
-    return None
-
-
-def collect_mqtt_messages(
-    conn: Any,
-    *,
-    timeout: float,
-    listen_seconds: float,
-    phase: str = "listen",
-    stop_when: Callable[[Any], bool] | None = None,
-) -> list[dict[str, Any]]:
-    if listen_seconds <= 0:
-        return []
-    deadline = time.monotonic() + listen_seconds
-    ping_interval = max(DEFAULT_MQTT_KEEPALIVE / 2, 1)
-    next_ping_at = time.monotonic() + ping_interval
-    messages: list[dict[str, Any]] = []
-    while time.monotonic() < deadline:
-        now = time.monotonic()
-        packet_timeout = min(
-            timeout,
-            max(0.001, deadline - now),
-            max(0.001, next_ping_at - now),
-        )
-        packet = read_mqtt_packet(conn, packet_timeout)
-        now = time.monotonic()
-        if packet is None:
-            if now >= next_ping_at and now < deadline:
-                conn.sendall(mqtt_packet(0xC0, b""))
-                next_ping_at = now + ping_interval
-                continue
-            break
-        packet_type, flags, payload = packet
-        if packet_type == 3:
-            topic, qos, message_payload, packet_id = parse_mqtt_publish(flags, payload)
-            messages.append(
-                {
-                    "topic": topic,
-                    "qos": qos,
-                    "packet_id": packet_id,
-                    "phase": phase,
-                    "payload_hex": message_payload.hex(),
-                    "decoded": decode_mqtt_payload_safely(message_payload),
-                }
-            )
-            if qos and packet_id is not None:
-                conn.sendall(mqtt_packet(0x40, packet_id.to_bytes(2, "big")))
-            if stop_when is not None and stop_when(messages[-1]["decoded"]):
-                break
-        elif packet_type == 13:
-            continue
-        else:
-            messages.append(
-                {
-                    "packet_type": packet_type,
-                    "flags": flags,
-                    "phase": phase,
-                    "payload_hex": payload.hex(),
-                }
-            )
-    return messages
+    if decoded.get("content_type") == "receipt":
+        return Ignored("receipt")
+    type_url = decoded.get("type_url")
+    if type_url == ANY_FORCE_OFFLINE_TYPE_URL:
+        return Kicked()
+    if type_url == ANY_ONLINE_STATUS_TYPE_URL:
+        serial = uid_to_serial.get(str(decoded.get("status_uid")))
+        status = decoded.get("online_status")
+        if serial is None or status not in ("status/online", "status/offline"):
+            return Ignored("unknown status")
+        return OnlineChange(serial, status == "status/online")
+    serial = uid_to_serial.get(str(decoded.get("from_uid")))
+    if serial is None:
+        return Ignored("unknown sender")
+    cmd = decoded.get("risp_cmd")
+    if cmd in (RISP_CMD_STATE_PUSH, RISP_CMD_ALL_STATE_RESPONSE):
+        return StatePush(serial, decoded)
+    if cmd == RISP_CMD_RECORD_PUSH:
+        return NewRecord(serial)
+    if cmd == RISP_CMD_CONFIG_REQUEST:
+        return ConfigChanged(serial)
+    return Ignored("unhandled message")
 
 
 def decode_mqtt_payload_safely(payload: bytes) -> dict[str, Any]:
@@ -709,6 +527,10 @@ def summarize_any(payload: bytes) -> dict[str, Any]:
         receipt_fields = decode_proto_fields(value)
         summary["receipt_status"] = first_proto_string(receipt_fields, 1)
         summary["receipt_cause"] = first_proto_string(receipt_fields, 2)
+    elif type_url == ANY_ONLINE_STATUS_TYPE_URL and isinstance(value, bytes):
+        status_fields = decode_proto_fields(value)
+        summary["online_status"] = first_proto_string(status_fields, 1)
+        summary["status_uid"] = first_proto_string(status_fields, 2)
     elif type_url == ANY_BYTES_VALUE_TYPE_URL and isinstance(value, bytes):
         bytes_fields = decode_proto_fields(value)
         command_proto = first_proto_value(bytes_fields, 1, 2)
@@ -753,7 +575,7 @@ def summarize_risp_frame(frame: bytes) -> dict[str, Any]:
         op_fields = decode_proto_fields(body) if body else []
         summary["op_mode"] = first_proto_value(op_fields, 1, 0)
         summary["op_state"] = first_proto_value(op_fields, 2, 0)
-    elif values.get("cmd") == RISP_CMD_ALL_STATE_RESPONSE:
+    elif values.get("cmd") in (RISP_CMD_ALL_STATE_RESPONSE, RISP_CMD_STATE_PUSH):
         summary.update(summarize_all_state_body(body))
     return summary
 
@@ -849,46 +671,3 @@ def first_proto_string(fields: list[dict[str, Any]], field_number: int) -> str |
     if not isinstance(value, bytes):
         return None
     return value.decode("utf-8", errors="replace")
-
-
-def mqtt_remaining_length(length: int) -> bytes:
-    if length < 0:
-        raise ValueError("MQTT remaining length must be non-negative")
-    out = bytearray()
-    while True:
-        digit = length % 128
-        length //= 128
-        if length:
-            digit |= 0x80
-        out.append(digit)
-        if not length:
-            return bytes(out)
-
-
-def mqtt_utf8(value: str) -> bytes:
-    encoded = value.encode("utf-8")
-    if len(encoded) > 0xFFFF:
-        raise ValueError("MQTT string too long")
-    return len(encoded).to_bytes(2, "big") + encoded
-
-
-def mqtt_packet(packet_type_and_flags: int, payload: bytes) -> bytes:
-    return bytes([packet_type_and_flags]) + mqtt_remaining_length(len(payload)) + payload
-
-
-def parse_mqtt_publish(flags: int, payload: bytes) -> tuple[str, int, bytes, int | None]:
-    if len(payload) < 2:
-        raise RuntimeError("malformed MQTT PUBLISH packet")
-    topic_len = int.from_bytes(payload[:2], "big")
-    offset = 2 + topic_len
-    if offset > len(payload):
-        raise RuntimeError("malformed MQTT PUBLISH packet: topic length exceeds payload")
-    topic = payload[2:offset].decode("utf-8", errors="replace")
-    qos = (flags >> 1) & 0x03
-    packet_id = None
-    if qos:
-        if offset + 2 > len(payload):
-            raise RuntimeError("malformed MQTT PUBLISH packet: missing packet id")
-        packet_id = int.from_bytes(payload[offset : offset + 2], "big")
-        offset += 2
-    return topic, qos, payload[offset:], packet_id

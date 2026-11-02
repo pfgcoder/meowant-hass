@@ -2,7 +2,7 @@
 
 Custom Home Assistant integration for UPET, Airrobo, and Meowant smart cat litter boxes.
 
-This integration uses the vendor cloud API for account/device data and the vendor IM/MQTT channel for live work commands and work-state polling.
+This integration uses the vendor cloud API for account/device data and one persistent vendor IM/MQTT connection for work commands and live updates pushed by the boxes.
 
 ## Warning
 
@@ -40,7 +40,7 @@ For safer use, create a separate UPET/Airrobo account and share litter box acces
   - Raise litter rake.
   - Lower litter rake.
   - Request MQTT state.
-- Live MQTT work status:
+- Live updates pushed by the box (see [Live Updates](#live-updates)):
   - Work mode.
   - Work state.
   - Work cause.
@@ -147,7 +147,7 @@ Device sensors:
 - MQTT work state.
 - MQTT work cause.
 - Last REST update and Last MQTT update. Disabled by default because they change on every
-  poll; enable them under the entity's settings if you need them.
+  update or push; enable them under the entity's settings if you need them.
 
 Entity names include the device name, for example `Litter Box Visits today` and `Tiny Visits today`.
 
@@ -252,29 +252,57 @@ automation:
 A box or cat the account no longer reports (after re-pairing a box or recreating a
 cat profile) can be deleted from its device page, once an update has loaded everything.
 
-## MQTT Behavior
+## Live Updates
 
-Work commands are sent through the vendor IM/MQTT path, not REST.
+The integration holds one MQTT connection to the vendor broker (port 21000, TLS) per
+account. The boxes push to every account they're linked to:
 
-The integration obtains MQTT credentials and topics from the vendor API, publishes command payloads to the IM publish topic, and polls `request_state` for live work status.
+| Push | What happens |
+| --- | --- |
+| Work state (RISP `0x400`) | Work mode, work state and Box status update at once. |
+| New record (RISP `0x3ff`) | Visit and clean records are fetched 3 seconds later. |
+| Settings request (RISP `0x9e7`) | The box picked up a settings change, from the app, the box or Home Assistant. Settings are fetched 3 seconds later. |
+| Online status | The box's Online sensor updates at once. |
 
-Polling intervals:
+Several pushes close together lead to one fetch. Commands go out over the same connection.
+After each connect, the integration asks every box for its state, so the sensors fill in before
+anything happens, and fetches the records it missed while disconnected. The REST update still
+runs every 3 minutes as well.
 
-- `RUNNING`: 5 seconds after each reply (the box answers in about a second).
-- `PAUSED`: every 10 seconds.
-- `PENDING`/standby/unknown: every 60 seconds.
+The command buttons are unavailable while the connection is down, and a press that can't be sent
+shows an error. After a button press, Box status and the MQTT sensors show the expected state
+with a `guessed: true` attribute until the box pushes its new state; a press that fails puts the
+last state back.
 
-A state request ends as soon as the box replies, and a box's next one waits until the last has
-finished, so slow replies during an outage can't pile up. Sends go one at a time, since they
-share the MQTT client ID. If the broker refuses or hangs up on the cached MQTT login, the integration logs
-in to IM again and retries once; nothing has been published at that point, so a command is never
-sent twice. After a button press, Box status and the MQTT sensors show the expected state with a
-`guessed: true` attribute until the box replies.
+Any MQTT message the integration doesn't recognize fires `ubpet_unknown_message` with its raw
+bytes in `payload_hex`, plus the sender, content type and RISP command when known. Command
+receipts are skipped. This keeps pushes nobody has decoded yet, such as health alerts, for later.
 
 Auto clean and its delay are one setting on the box, so changing either is refused while the
 other isn't known (for example when the settings call failed), rather than overwriting it.
 
-MQTT polling starts after Home Assistant finishes setting up the integration, so startup is not blocked by MQTT traffic.
+The connection starts in the background, so Home Assistant's startup doesn't wait for it.
+
+### One session per account
+
+The vendor allows one session per account. Any other login, such as the mobile app or a second
+integration, takes over the session and disconnects this one. The integration waits a minute
+before reconnecting, which signs the other login out in turn. Each further takeover doubles the
+wait, up to 30 minutes, so occasional app use still works. A session that stays up for 10
+minutes resets the wait.
+
+While it waits, the integration also skips its REST updates, because any REST login would sign
+the other session out early. When it reconnects, it fetches the records it missed.
+
+The integration's own token refresh also replaces the session, so in that case it reconnects
+after 5 seconds. A refused password stops the reconnects; the reauth that the next REST update
+starts reconnects once the password is fixed.
+
+To use the app and the integration side by side, share the boxes to a second account and give
+the integration that one (see [Warning](#warning)). Some settings can then only be changed with
+the owner's account; see [Limitations](#limitations).
+
+Ported from [bojanrajkovic/upet-hass](https://github.com/bojanrajkovic/upet-hass).
 
 ## Confirmed MQTT Commands
 
@@ -304,6 +332,7 @@ Confirmed operation ordinals:
 ## Limitations
 
 - The integration depends on the vendor cloud and vendor IM/MQTT service.
+- One session per account: the mobile app and the integration disconnect each other. See [One session per account](#one-session-per-account).
 - Commands are confirmed by MQTT delivery/status responses, but full semantic validation of every receipt/error cause is not complete.
 - The box only reports a changed setting once it applies it, so the child lock, waste-bin full alert, shake mode and foreign object detection switches show the new value at once and confirm it with a refresh 15 seconds later.
 - On an account the box is shared with, the vendor refuses some settings changes that only the
@@ -319,7 +348,7 @@ Confirmed operation ordinals:
 Run dependency-free tests:
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -I -B -m unittest discover -s tests -v
 ```
 
 Run quick checks:
@@ -339,10 +368,12 @@ The current tests cover:
 - Authenticated request headers.
 - Dashboard aggregation.
 - Settings payload builders, and the auto clean guard.
-- IM credential/contact lookup, one send at a time, and retry.
-- MQTT codec, packet helpers, RISP/protobuf payload generation, and service ordinals.
-- Coordinator: reauth, MQTT state replies, one poll at a time, guessed states, kept parts and
-  outage logging.
+- IM account lookup.
+- MQTT codec, RISP/protobuf payload generation, service ordinals and push classification.
+- The persistent connection: each push, commands, takeovers, reconnect backoff and refused logins.
+- Coordinator: reauth, pushed states, skipped updates while yielding, guessed states, kept
+  parts, outage logging and visit events.
+- Command buttons: availability and failed sends.
 - Sensors: setup, Last used by (and its restore), today counts, cat matching and attribute
   filtering.
 - Setup: unique ID migration and the records option.
@@ -375,7 +406,7 @@ MQTT command format:
 Message -> MessageContent(custom) -> Any(BytesValue) -> CommandProto(protype=2) -> RISP frame -> AirPet protobuf body
 ```
 
-MQTT state request uses RISP command `0x3fd`. Operation commands use RISP command `0x3fb`.
+MQTT state request uses RISP command `0x3fd`. Operation commands use RISP command `0x3fb`. Boxes push work-state changes as `0x400`, with the same body as the `0x3fd` reply, and new-record signals as `0x3ff`.
 
 ## Roadmap
 

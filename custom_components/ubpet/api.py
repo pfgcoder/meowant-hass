@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import importlib.util
 import json
 import logging
-from pathlib import Path
 import random
-import sys
 import threading
 import time
 from typing import Any
@@ -15,32 +12,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-try:
-    from .mqtt import MqttConnectError, mqtt_endpoint, publish_service
-except ImportError:
-    _MQTT_PATH = Path(__file__).with_name("mqtt.py")
-    _mqtt_spec = importlib.util.spec_from_file_location("ubpet_mqtt", _MQTT_PATH)
-    if _mqtt_spec is None or _mqtt_spec.loader is None:
-        raise
-    _mqtt = importlib.util.module_from_spec(_mqtt_spec)
-    sys.modules[_mqtt_spec.name] = _mqtt
-    _mqtt_spec.loader.exec_module(_mqtt)
-    publish_service = _mqtt.publish_service
-    mqtt_endpoint = _mqtt.mqtt_endpoint
-    MqttConnectError = _mqtt.MqttConnectError
-
 USER_AGENT = "CatLitterBoxOverseasEu/2.1.12 (com.ubtrobot.airpet.overseaseu; build:699; iOS 26.5.0) Alamofire/5.5.0"
 NONCE_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-QUICK_MQTT_REPLY_SERVICES = {
-    "start_clean_up",
-    "pause_clean_up",
-    "resume_clean_up",
-    "start_flatten",
-    "pause_flatten",
-    "resume_flatten",
-    "start_rise",
-    "start_drop",
-}
 # A day's worth of visits (about 15 a day with three cats) and of cleans (about 6), for the
 # today counts. Households with more cats can raise it in the integration's options.
 DEFAULT_RECORDS_PER_FETCH = 50
@@ -52,8 +25,6 @@ WRONG_PASSWORD_CODES = frozenset({2002, 2006, 2014, 2342})
 # incorrect", 2011 bad phone number, 2019 bad email, and 1009 "parameter error", which an email
 # account gets for account type 2.
 NO_SUCH_ACCOUNT_CODES = frozenset({1009, 2004, 2010, 2011, 2019, 2042})
-# The shortest time between two lookups of a box's IM contact after state requests it didn't answer.
-IM_CONTACT_RECHECK_SECONDS = 600
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -130,14 +101,6 @@ class UbpetClient:
         self.signer = UbtV2Signer(app_key)
         self.auth: UbpetAuth | None = None
         self._auth_lock = threading.Lock()
-        # The IM login (MQTT credentials and our sender uid) and each box's IM contact with when it
-        # was looked up, reused between MQTT sends instead of fetched over REST every time; the
-        # login is dropped when a send fails. The MQTT client ID comes with the IM login, and the
-        # broker drops a connection when another opens with its ID, so polls and button presses
-        # (in different threads) send one at a time under this lock, which also guards the cache.
-        self._mqtt_lock = threading.Lock()
-        self._im_session: tuple[dict[str, Any], str] | None = None
-        self._im_contacts: dict[str, tuple[dict[str, Any], float]] = {}
 
     def ensure_login(self) -> UbpetAuth:
         if auth := self._usable_auth():
@@ -279,75 +242,6 @@ class UbpetClient:
     def get_im_friends(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/v1/ubtechinc-im-manager/im/friends", auth=True)
         return _require_list(data)
-
-    def send_mqtt_service(self, serial_number: str, service_id: str) -> dict[str, Any]:
-        with self._mqtt_lock:
-            reused_login = self._im_session is not None
-            try:
-                return self._send_mqtt_service_once(serial_number, service_id)
-            except MqttConnectError as err:
-                if not reused_login:
-                    raise
-                # The broker turned away the reused IM login, most likely expired. Nothing was
-                # published, so a retry with a fresh login can't send the command twice.
-                _LOGGER.info("UPET MQTT %s for %s; logging in to IM again and retrying once", err, serial_number)
-                return self._send_mqtt_service_once(serial_number, service_id)
-
-    def _send_mqtt_service_once(self, serial_number: str, service_id: str) -> dict[str, Any]:
-        """One send, under _mqtt_lock."""
-        credentials, from_uid, contact = self._im_session_for(serial_number)
-        publish_credentials, publish_sources = _mqtt_publish_credentials(credentials)
-        target_uid = str(contact["userId"])
-        try:
-            parts = publish_service(
-                base_url=self.base_url,
-                credentials=publish_credentials,
-                target_uid=target_uid,
-                from_uid=from_uid,
-                service_id=service_id,
-                seq=None,
-                listen_seconds=_mqtt_listen_seconds(service_id),
-                # A state request is answered once, so stop listening as soon as the box replies.
-                stop_on_state_reply=service_id == "request_state",
-            )
-        except (OSError, RuntimeError):
-            # The reused IM login may have expired; the next send fetches a fresh one.
-            self._im_session = None
-            raise
-        result = parts.as_dict()
-        result["from_uid"] = from_uid
-        result["target_uid"] = target_uid
-        result["im_login_keys"] = sorted(str(key) for key in credentials)
-        mqtt_host, mqtt_port, mqtt_host_source = mqtt_endpoint(self.base_url, credentials)
-        result["mqtt_host"] = mqtt_host
-        result["mqtt_port"] = mqtt_port
-        result["mqtt_host_source"] = mqtt_host_source
-        result["publish_topic"] = publish_credentials.get("pubTopic")
-        result["publish_topic_source"] = publish_sources["topic"]
-        result["publish_username_source"] = publish_sources["username"]
-        result["publish_password_source"] = publish_sources["password"]
-        result["publish_url_source"] = publish_sources["url"]
-        result["matched_contact"] = _safe_contact_summary(contact)
-        result.update(_summarize_mqtt_result(result, target_uid=target_uid))
-        if service_id == "request_state" and result["target_reply_status"] != "observed":
-            # The box always answers a state request when it's online. No answer may mean its IM
-            # contact changed (the box was paired again), or only that the box is offline, so look
-            # the contact up afresh, but not on every poll.
-            _contact, looked_up_at = self._im_contacts.get(serial_number, ({}, 0.0))
-            if time.monotonic() - looked_up_at > IM_CONTACT_RECHECK_SECONDS:
-                self._im_contacts.pop(serial_number, None)
-        return result
-
-    def _im_session_for(self, serial_number: str) -> tuple[dict[str, Any], str, dict[str, Any]]:
-        if self._im_session is None:
-            credentials = self.get_im_credentials()
-            self._im_session = (credentials, _find_account_uid(credentials, self.auth))
-            self._im_contacts = {}
-        if serial_number not in self._im_contacts:
-            contact = _find_im_contact(self.get_im_friends(), serial_number)
-            self._im_contacts[serial_number] = (contact, time.monotonic())
-        credentials, from_uid = self._im_session
-        return credentials, from_uid, self._im_contacts[serial_number][0]
 
     def get_cats(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/catbox-server/web/cat/info", auth=True)
@@ -610,45 +504,7 @@ def _quote(value: str) -> str:
     return urllib.parse.quote(value, safe="")
 
 
-def _find_im_contact(friends: list[dict[str, Any]], serial_number: str) -> dict[str, Any]:
-    for friend in friends:
-        if friend.get("userName") == serial_number and friend.get("userId"):
-            return friend
-    raise UbpetApiError(200, {"code": "missing_im_contact", "message": f"No IM contact found for {serial_number}"})
-
-
-def _safe_contact_summary(contact: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "userName": contact.get("userName"),
-        "userId": contact.get("userId"),
-        "onlineStatus": contact.get("onlineStatus"),
-        "alias": contact.get("alias"),
-        "nickName": contact.get("nickName"),
-    }
-
-
-def _mqtt_publish_credentials(
-    credentials: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, str]]:
-    publish_credentials = dict(credentials)
-    sources = {
-        "topic": "im_login.pubTopic",
-        "username": "im_login.mqttUserName",
-        "password": "im_login.mqttPassword",
-        "url": "base_url",
-    }
-    return publish_credentials, sources
-
-
-def _mqtt_listen_seconds(service_id: str) -> int:
-    if service_id == "request_state":
-        return 5
-    if service_id in QUICK_MQTT_REPLY_SERVICES:
-        return 2
-    return 10
-
-
-def _find_account_uid(credentials: dict[str, Any], auth: UbpetAuth | None) -> str:
+def find_account_uid(credentials: dict[str, Any], auth: UbpetAuth | None) -> str:
     for key in ("uid", "userId", "imUserId", "accountUid"):
         value = credentials.get(key)
         if value not in (None, ""):
@@ -663,35 +519,6 @@ def _find_account_uid(credentials: dict[str, Any], auth: UbpetAuth | None) -> st
             "im_login_keys": sorted(str(key) for key in credentials),
         },
     )
-
-
-def _summarize_mqtt_result(result: dict[str, Any], *, target_uid: str) -> dict[str, Any]:
-    delivery_status = "not_observed"
-    target_reply_status = "not_observed"
-    receipt_cause = None
-    messages = result.get("received_messages")
-    if not isinstance(messages, list):
-        messages = []
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        decoded = message.get("decoded")
-        if not isinstance(decoded, dict):
-            continue
-        receipt_status = decoded.get("receipt_status")
-        if receipt_status == "receipt/success":
-            delivery_status = "delivered"
-            receipt_cause = decoded.get("receipt_cause")
-        elif receipt_status == "receipt/unreachable":
-            delivery_status = "unreachable"
-            receipt_cause = decoded.get("receipt_cause")
-        if decoded.get("from_uid") == target_uid:
-            target_reply_status = "observed"
-    return {
-        "delivery_status": delivery_status,
-        "target_reply_status": target_reply_status,
-        "receipt_cause": receipt_cause,
-    }
 
 
 def _optional_call(func, *args) -> Any:

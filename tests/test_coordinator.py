@@ -127,42 +127,6 @@ def _state_reply(from_uid: str, mode: str) -> dict:
     }
 
 
-class MqttStateReplyTests(unittest.TestCase):
-    def setUp(self):
-        self.coordinator = load_coordinator_module()
-
-    def test_reply_keeps_the_state_and_files_the_bookkeeping_apart(self):
-        reply = _state_reply("717401", "IDLE")
-        reply["decoded"].update({"cid": "cid-1", "risp_seq": 9, "new_decoder_field": 1, "w_cause": 90})
-
-        state = self.coordinator._latest_mqtt_state({"target_uid": "717401", "received_messages": [reply]})
-
-        self.assertEqual(
-            {key: value for key, value in state.items() if key != "message"},
-            {"w_mode_app_name": "IDLE", "w_state_app_name": "PENDING", "w_cause": 90},
-        )
-        self.assertEqual(state["message"]["cid"], "cid-1")
-
-    def test_reply_from_the_box_sets_the_state(self):
-        result = {"target_uid": "717401", "received_messages": [_state_reply("717401", "IDLE")]}
-
-        self.assertEqual(self.coordinator._latest_mqtt_state(result)["w_mode_app_name"], "IDLE")
-
-    def test_reply_from_another_sender_is_ignored(self):
-        result = {
-            "target_uid": "717401",
-            "received_messages": [_state_reply("717401", "IDLE"), _state_reply("999999", "CLEANING")],
-        }
-
-        self.assertEqual(self.coordinator._latest_mqtt_state(result)["w_mode_app_name"], "IDLE")
-        self.assertIsNone(self.coordinator._latest_mqtt_state({**result, "received_messages": result["received_messages"][1:]}))
-
-    def test_without_a_target_no_reply_is_trusted(self):
-        result = {"received_messages": [_state_reply("717401", "IDLE")]}
-
-        self.assertIsNone(self.coordinator._latest_mqtt_state(result))
-
-
 def _entry(create_task=None):
     """A config entry that hands the coroutines of its background tasks to create_task."""
     return types.SimpleNamespace(
@@ -339,34 +303,6 @@ class RecordEventTests(unittest.TestCase):
         self.assertNotIn("SN1", STORED.get("ubpet.entry.visits", {}))
 
 
-class MqttPollFailureLogTests(unittest.TestCase):
-    def test_failing_polls_warn_once_and_log_when_they_work_again(self):
-        import asyncio
-
-        module = load_coordinator_module()
-        replies = [OSError("timed out"), OSError("timed out"), {"target_uid": "717401", "received_messages": []}]
-
-        def send(serial, service_id):
-            reply = replies.pop(0)
-            if isinstance(reply, Exception):
-                raise reply
-            return reply
-
-        async def run_in_executor(func, *args):
-            return func(*args)
-
-        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
-        coordinator = module.UbpetDataUpdateCoordinator(hass, _entry(), types.SimpleNamespace(send_mqtt_service=send))
-        coordinator.data = {"devices": {"SN1": {}}}
-
-        with self.assertLogs(module._LOGGER, "INFO") as logs:
-            for _ in range(3):
-                asyncio.run(coordinator.async_request_mqtt_state("SN1"))
-
-        self.assertEqual(len([record for record in logs.records if record.levelname == "WARNING"]), 1)
-        self.assertTrue(any("work again" in record.getMessage() for record in logs.records))
-
-
 class GuessedStateTests(unittest.TestCase):
     def setUp(self):
         coordinator_module = load_coordinator_module()
@@ -377,9 +313,7 @@ class GuessedStateTests(unittest.TestCase):
         return self.coordinator.data["devices"]["SN1"].get("mqtt_state")
 
     def reply(self, mode):
-        self.coordinator.store_mqtt_result(
-            "SN1", {"target_uid": "717401", "received_messages": [_state_reply("717401", mode)]}
-        )
+        self.coordinator.store_state_push("SN1", _state_reply("717401", mode)["decoded"])
 
     def test_undoing_a_guess_before_any_reply_clears_it(self):
         guess = self.coordinator.set_mqtt_work_state("SN1", {"w_state_app_name": "RUNNING"})
@@ -417,203 +351,89 @@ class GuessedStateTests(unittest.TestCase):
                 self.assertEqual(self.state()["w_mode_app_name"], "IDLE")
 
 
-class RefusedLoginTests(unittest.TestCase):
-    def test_refused_login_asks_for_reauth_and_stops_mqtt_polls(self):
-        import asyncio
+class PushedStateTests(unittest.TestCase):
+    """State and online status from the persistent MQTT connection (bojanrajkovic/upet-hass 37ebe31)."""
 
-        coordinator_module = load_coordinator_module()
-        auth_failed = coordinator_module.ConfigEntryAuthFailed
-
-        def get_dashboard():
-            raise coordinator_module.UbpetAuthError("login refused")
-
-        async def run_in_executor(func, *args):
-            return func(*args)
-
-        coordinator = coordinator_module.UbpetDataUpdateCoordinator(
-            types.SimpleNamespace(async_add_executor_job=run_in_executor),
-            _entry(),
-            types.SimpleNamespace(get_dashboard=get_dashboard),
-        )
-        coordinator._mqtt_state_polls_enabled = True
-
-        with self.assertRaises(auth_failed):
-            asyncio.run(coordinator._async_update_data())
-        self.assertFalse(coordinator._mqtt_state_polls_enabled)
-        self.assertTrue(coordinator._mqtt_state_polls_paused_for_auth)
-
-    def test_polls_stopped_by_a_refused_login_restart_when_login_works_again(self):
-        import asyncio
-
-        coordinator_module = load_coordinator_module()
-
-        def refused(serial, service_id):
-            raise coordinator_module.UbpetAuthError("login refused")
-
-        async def run_in_executor(func, *args):
-            return func(*args)
-
-        def create_task(coro):
-            coro.close()
-            return types.SimpleNamespace(done=lambda: False, cancel=lambda: None)
-
-        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
-        client = types.SimpleNamespace(
-            send_mqtt_service=refused,
-            get_dashboard=lambda: {"devices": {"SN1": _loaded_box()}, "cats": []},
-        )
-        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, _entry(create_task), client)
-        coordinator.data = {"devices": {"SN1": {}}}
-        coordinator._mqtt_state_polls_enabled = True
-
-        with self.assertLogs(coordinator_module._LOGGER, "WARNING"):
-            asyncio.run(coordinator.async_request_mqtt_state("SN1"))
-        self.assertFalse(coordinator._mqtt_state_polls_enabled)
-
-        asyncio.run(coordinator._async_update_data())
-        self.assertTrue(coordinator._mqtt_state_polls_enabled)
-        self.assertIn("SN1", coordinator._next_mqtt_poll_at_by_serial)
-
-    def test_an_update_finishing_after_unload_leaves_the_polls_stopped(self):
-        import asyncio
-
-        coordinator_module = load_coordinator_module()
-
-        async def run_in_executor(func, *args):
-            return func(*args)
-
-        def create_task(coro):
-            raise AssertionError("no poll loop should start")
-
-        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
-        client = types.SimpleNamespace(get_dashboard=lambda: {"devices": {"SN1": _loaded_box()}, "cats": []})
-        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, _entry(create_task), client)
-        coordinator._pause_mqtt_state_polls_for_auth()
-
-        coordinator.cancel_mqtt_state_polls()
-        asyncio.run(coordinator._async_update_data())
-
-        self.assertFalse(coordinator._mqtt_state_polls_enabled)
-
-    def test_a_poll_refused_after_unload_leaves_the_polls_stopped(self):
-        import asyncio
-
-        coordinator_module = load_coordinator_module()
-
-        def refused(serial, service_id):
-            raise coordinator_module.UbpetAuthError("login refused")
-
-        async def run_in_executor(func, *args):
-            return func(*args)
-
-        def create_task(coro):
-            raise AssertionError("no poll loop should start")
-
-        hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
-        client = types.SimpleNamespace(
-            send_mqtt_service=refused,
-            get_dashboard=lambda: {"devices": {"SN1": _loaded_box()}, "cats": []},
-        )
-        coordinator = coordinator_module.UbpetDataUpdateCoordinator(hass, _entry(create_task), client)
-        coordinator.data = {"devices": {"SN1": {}}}
-
-        coordinator.cancel_mqtt_state_polls()
-        # A poll that was still running at unload comes back with a refused login.
-        with self.assertLogs(coordinator_module._LOGGER, "WARNING"):
-            asyncio.run(coordinator.async_request_mqtt_state("SN1"))
-        asyncio.run(coordinator._async_update_data())
-        coordinator.enable_mqtt_state_polls()
-
-        self.assertFalse(coordinator._mqtt_state_polls_enabled)
-
-
-class OnePollAtATimeTests(unittest.TestCase):
-    def test_a_box_is_not_polled_again_until_its_last_request_ends(self):
-        import asyncio
-
-        module = load_coordinator_module()
-        sends = []
-        tasks = []
-
-        async def scenario():
-            send_finished = asyncio.get_running_loop().create_future()
-
-            async def run_in_executor(func, *args):
-                sends.append(args)
-                return await send_finished
-
-            hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
-            coordinator = module.UbpetDataUpdateCoordinator(
-                hass,
-                _entry(lambda coro: tasks.append(asyncio.ensure_future(coro))),
-                types.SimpleNamespace(send_mqtt_service=None),
-            )
-            coordinator.data = {"devices": {"SN1": {}}}
-            first = asyncio.ensure_future(coordinator.async_request_mqtt_state("SN1"))
-            await asyncio.sleep(0)
-
-            # Long overdue, but the first send is still running: no second one joins the queue.
-            coordinator._next_mqtt_poll_at_by_serial["SN1"] = datetime.now(UTC) - timedelta(minutes=5)
-            coordinator._run_due_mqtt_state_polls()
-            await coordinator.async_request_mqtt_state("SN1")
-            self.assertEqual((len(sends), tasks), (1, []))
-
-            send_finished.set_result({"target_uid": "717401", "received_messages": []})
-            await first
-            self.assertNotIn("SN1", coordinator._mqtt_state_requests_in_progress)
-            self.assertIn("SN1", coordinator._next_mqtt_poll_at_by_serial)
-
-        asyncio.run(scenario())
-
-
-class BackgroundTaskTests(unittest.TestCase):
-    def test_state_requests_and_the_poll_loop_are_tasks_shutdown_does_not_wait_for(self):
-        module = load_coordinator_module()
-        started = []
-
-        def create_background_task(hass, target, name):
-            target.close()
-            started.append(name)
-            return types.SimpleNamespace(done=lambda: False, cancel=lambda: None)
-
-        def create_task(target):
-            raise AssertionError("Home Assistant waits for these tasks when it stops")
-
-        coordinator = module.UbpetDataUpdateCoordinator(
-            types.SimpleNamespace(async_create_task=create_task),
-            types.SimpleNamespace(entry_id="entry", async_create_background_task=create_background_task),
-            None,
-        )
-        coordinator.data = {"devices": {"SN1": {}}}
-
-        # A press before the polls start, then the poll loop, then a due poll.
-        coordinator.start_mqtt_state_poll("SN1", fast=True)
-        coordinator.enable_mqtt_state_polls()
-        coordinator._run_due_mqtt_state_polls()
-
-        self.assertEqual(started, ["ubpet state request", "ubpet state poll loop", "ubpet state request"])
-
-
-class FastPollTests(unittest.TestCase):
     def setUp(self):
-        self.requested = []
-        coordinator_module = load_coordinator_module()
-        self.coordinator = coordinator_module.UbpetDataUpdateCoordinator(
-            types.SimpleNamespace(), _entry(lambda request: None), None
+        self.module = load_coordinator_module()
+        self.updates = []
+        self.coordinator = self.module.UbpetDataUpdateCoordinator(types.SimpleNamespace(), _entry(), None)
+        self.coordinator.async_update_listeners = lambda: self.updates.append(True)
+        self.coordinator.data = {"devices": {"SN1": {"online": {"online": True}}}}
+
+    def test_a_push_keeps_the_state_and_files_the_bookkeeping_apart(self):
+        decoded = _state_reply("717401", "IDLE")["decoded"]
+        decoded.update({"cid": "cid-1", "risp_seq": 9, "new_decoder_field": 1, "w_cause": 90, "risp_cmd": 1024})
+
+        self.assertTrue(self.coordinator.store_state_push("SN1", decoded))
+
+        state = self.coordinator.data["devices"]["SN1"]["mqtt_state"]
+        self.assertEqual(
+            {key: value for key, value in state.items() if key != "message"},
+            {"w_mode_app_name": "IDLE", "w_state_app_name": "PENDING", "w_cause": 90},
         )
-        self.coordinator.async_request_mqtt_state = self.requested.append
+        self.assertEqual((state["message"]["cid"], state["message"]["risp_cmd"]), ("cid-1", 1024))
+        self.assertIsNotNone(self.coordinator.last_mqtt_update_at("SN1"))
 
-    def test_a_press_before_polls_start_asks_for_the_state_at_once(self):
-        self.coordinator.start_mqtt_state_poll("SN1", fast=True)
+    def test_a_message_without_a_state_changes_nothing(self):
+        self.assertFalse(self.coordinator.store_state_push("SN1", {"risp_cmd": 1024, "from_uid": "717401"}))
+        self.assertNotIn("mqtt_state", self.coordinator.data["devices"]["SN1"])
 
-        self.assertEqual(self.requested, ["SN1"])
+    def test_an_online_push_updates_the_box(self):
+        self.coordinator.set_online("SN1", False)
 
-    def test_a_press_after_a_refused_login_asks_nothing(self):
-        self.coordinator._pause_mqtt_state_polls_for_auth()
+        self.assertFalse(self.coordinator.data["devices"]["SN1"]["online"]["online"])
+        self.assertEqual(self.updates, [True])
 
-        self.coordinator.start_mqtt_state_poll("SN1", fast=True)
+    def test_an_online_push_for_an_unknown_box_is_ignored(self):
+        self.coordinator.set_online("SN9", False)
 
-        self.assertEqual(self.requested, [])
+        self.assertEqual(self.updates, [])
+
+
+class UpdateTests(unittest.TestCase):
+    def setUp(self):
+        import asyncio
+
+        self.asyncio = asyncio
+        self.module = load_coordinator_module()
+        self.calls = []
+
+        async def run_in_executor(func, *args):
+            return func(*args)
+
+        self.hass = types.SimpleNamespace(async_add_executor_job=run_in_executor)
+
+    def coordinator(self, get_dashboard):
+        def dashboard():
+            self.calls.append("dashboard")
+            return get_dashboard()
+
+        return self.module.UbpetDataUpdateCoordinator(self.hass, _entry(), types.SimpleNamespace(get_dashboard=dashboard))
+
+    def test_a_refused_login_asks_for_reauth(self):
+        def refused():
+            raise self.module.UbpetAuthError("login refused")
+
+        with self.assertRaises(self.module.ConfigEntryAuthFailed):
+            self.asyncio.run(self.coordinator(refused)._async_update_data())
+
+    def test_no_rest_update_while_another_login_holds_the_session(self):
+        # A REST login now would sign the other session out (bojanrajkovic/upet-hass e9aa233).
+        coordinator = self.coordinator(lambda: {"devices": {}, "cats": []})
+        coordinator.data = {"devices": {"SN1": {}}}
+        coordinator.push = types.SimpleNamespace(yielding=True)
+
+        self.assertEqual(self.asyncio.run(coordinator._async_update_data()), {"devices": {"SN1": {}}})
+        self.assertEqual(self.calls, [])
+
+    def test_the_first_update_runs_even_while_yielding(self):
+        coordinator = self.coordinator(lambda: {"devices": {}, "cats": []})
+        coordinator.push = types.SimpleNamespace(yielding=True)
+
+        self.asyncio.run(coordinator._async_update_data())
+
+        self.assertEqual(self.calls, ["dashboard"])
 
 
 if __name__ == "__main__":

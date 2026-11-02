@@ -41,7 +41,16 @@ def load_init_module():
             ),
         ),
         "homeassistant.core": _module("homeassistant.core", HomeAssistant=object, callback=lambda func: func),
-        "homeassistant.exceptions": _module("homeassistant.exceptions", ConfigEntryAuthFailed=Exception),
+        "homeassistant.exceptions": _module(
+            "homeassistant.exceptions", ConfigEntryAuthFailed=Exception, HomeAssistantError=Exception
+        ),
+        "homeassistant.util": _module("homeassistant.util"),
+        "homeassistant.util.ssl": _module("homeassistant.util.ssl", client_context=None),
+        # push.py's MQTT client, not installed for these tests.
+        "paho": _module("paho"),
+        "paho.mqtt": _module("paho.mqtt"),
+        "paho.mqtt.client": _module("paho.mqtt.client", Client=object, MQTTMessage=object),
+        "paho.mqtt.enums": _module("paho.mqtt.enums", CallbackAPIVersion=types.SimpleNamespace(VERSION2=2)),
         "homeassistant.helpers": _module(
             "homeassistant.helpers", device_registry=device_registry, entity_registry=entity_registry
         ),

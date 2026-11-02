@@ -5,8 +5,8 @@
   "config_flow": true,
   "documentation": "https://github.com/CrazzyBerg/upet-hass",
   "issue_tracker": "https://github.com/CrazzyBerg/upet-hass/issues",
-  "iot_class": "cloud_polling",
-  "requirements": [],
+  "iot_class": "cloud_push",
+  "requirements": ["paho-mqtt>=2.0"],
   "version": "1.1.2+pfg.19",
   "diagnostics": true
 }

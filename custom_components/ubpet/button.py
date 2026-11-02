@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -163,7 +164,13 @@ class UbpetMqttCommandButton(CoordinatorEntity[UbpetDataUpdateCoordinator], Butt
         if not super().available:
             return False
         service_id = self.entity_description.service_id
-        if service_id in DIAGNOSTIC_SERVICES or service_id in (RESET_WASTE_BIN_SERVICE, RESET_DEODORANT_SERVICE):
+        if service_id in (REST_REQUEST_SERVICE, RESET_WASTE_BIN_SERVICE, RESET_DEODORANT_SERVICE):
+            return True
+        # Commands and state requests go over the persistent connection, so they wait for it.
+        push = self.coordinator.push
+        if push is None or not push.connected:
+            return False
+        if service_id in DIAGNOSTIC_SERVICES:
             return True
         item = self.coordinator.data.get("devices", {}).get(self._serial)
         mode = _mqtt_work_mode(item)
@@ -205,35 +212,18 @@ class UbpetMqttCommandButton(CoordinatorEntity[UbpetDataUpdateCoordinator], Butt
             optimistic_state = _optimistic_mqtt_state_for_service(self.entity_description.service_id)
         if optimistic_state:
             guessed_state = self.coordinator.set_mqtt_work_state(self._serial, optimistic_state)
+        push = self.coordinator.push
         try:
-            result = await self.hass.async_add_executor_job(
-                self.coordinator.client.send_mqtt_service,
-                self._serial,
-                self.entity_description.service_id,
-            )
+            if push is None:
+                raise HomeAssistantError("Not connected to the Air Pet cloud right now. Try again in a minute.")
+            # Over the persistent connection (bojanrajkovic/upet-hass 37ebe31). The box pushes its
+            # new state as it changes, so there's nothing to wait for here.
+            await push.async_publish(self._serial, self.entity_description.service_id)
         except Exception:
-            # The send can fail after the command went out (the socket closing while we listen),
-            # so stop showing the guess and ask the box for its real state straight away.
+            # Stop showing the guess; the box's last pushed state stays.
             if optimistic_state:
                 self.coordinator.restore_mqtt_work_state(self._serial, guessed_state)
-            if self.entity_description.service_id not in DIAGNOSTIC_SERVICES:
-                self.coordinator.start_mqtt_state_poll(self._serial, fast=True)
             raise
-        _LOGGER.info(
-            "Sent UPET MQTT service=%s serial=%s seq=%s cid=%s received=%s",
-            self.entity_description.service_id,
-            self._serial,
-            result.get("seq") if isinstance(result, dict) else None,
-            result.get("cid") if isinstance(result, dict) else None,
-            result.get("received_count") if isinstance(result, dict) else None,
-        )
-        if isinstance(result, dict):
-            result.setdefault("service_id", self.entity_description.service_id)
-        self.coordinator.store_mqtt_result(self._serial, result)
-        if self.entity_description.service_id == "request_state":
-            self.coordinator.start_mqtt_state_poll(self._serial)
-        elif self.entity_description.service_id not in DIAGNOSTIC_SERVICES:
-            self.coordinator.start_mqtt_state_poll(self._serial, fast=True)
 
 
 def _mqtt_work_state(item: dict[str, Any] | None) -> str | None:

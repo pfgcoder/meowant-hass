@@ -15,70 +15,6 @@ sys.modules[spec.name] = mqtt
 spec.loader.exec_module(mqtt)
 
 
-def parse_packet(packet: bytes) -> tuple[int, int, bytes]:
-    remaining = 0
-    multiplier = 1
-    index = 1
-    while True:
-        digit = packet[index]
-        index += 1
-        remaining += (digit & 0x7F) * multiplier
-        if not (digit & 0x80):
-            break
-        multiplier *= 128
-    return packet[0] >> 4, packet[0] & 0x0F, packet[index : index + remaining]
-
-
-class FakeConnection:
-    def __init__(self) -> None:
-        self.buffer = bytearray()
-        self.sent: list[tuple[int, int, bytes]] = []
-
-    def settimeout(self, timeout: float) -> None:
-        self.timeout = timeout
-
-    def recv(self, length: int) -> bytes:
-        if not self.buffer:
-            raise mqtt.socket.timeout()
-        out = bytes(self.buffer[:length])
-        del self.buffer[:length]
-        return out
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def close(self) -> None:
-        pass
-
-    def sendall(self, packet: bytes) -> None:
-        packet_type, flags, payload = parse_packet(packet)
-        self.sent.append((packet_type, flags, payload))
-        if packet_type == 1:
-            self.buffer += mqtt.mqtt_packet(0x20, b"\x00\x00")
-        elif packet_type == 8:
-            packet_id = int.from_bytes(payload[:2], "big")
-            self.buffer += mqtt.mqtt_packet(0x90, packet_id.to_bytes(2, "big") + b"\x01")
-
-
-class FakeReplyConnection(FakeConnection):
-    def sendall(self, packet: bytes) -> None:
-        packet_type, flags, payload = parse_packet(packet)
-        self.sent.append((packet_type, flags, payload))
-        if packet_type == 1:
-            self.buffer += mqtt.mqtt_packet(0x20, b"\x00\x00")
-        elif packet_type == 8:
-            packet_id = int.from_bytes(payload[:2], "big")
-            self.buffer += mqtt.mqtt_packet(0x90, packet_id.to_bytes(2, "big") + b"\x01")
-        elif packet_type == 3:
-            self.buffer += mqtt.mqtt_packet(
-                0x32,
-                mqtt.mqtt_utf8("sub/topic") + (9).to_bytes(2, "big") + b"reply",
-            )
-
-
 def build_receipt_im_message(cid: str, status: str, cause: str = "") -> bytes:
     receipt = mqtt.field_string(1, status) + mqtt.field_string(2, cause)
     receipt_any = mqtt.encode_any(mqtt.ANY_RECEIPT_NOTIFICATION_TYPE_URL, receipt)
@@ -148,78 +84,6 @@ class MqttCodecUnitTests(unittest.TestCase):
         # Paused while cleaning keeps its name, so the resume button works.
         self.assertEqual(mqtt.summarize_all_state_body(bytes.fromhex("08021003"))["w_state_app_name"], "PAUSED")
 
-    def test_refused_connect_is_a_connect_error(self):
-        class RefusingConnection(FakeConnection):
-            def sendall(self, packet: bytes) -> None:
-                self.sent.append(parse_packet(packet))
-                # CONNACK with return code 5: not authorised.
-                self.buffer += mqtt.mqtt_packet(0x20, b"\x00\x05")
-
-        conn = RefusingConnection()
-        with self.assertRaises(mqtt.MqttConnectError):
-            self.publish(conn)
-        self.assertEqual(len(conn.sent), 1)
-
-    def test_refused_subscription_is_a_connect_error(self):
-        class RefusingSubscriptionConnection(FakeConnection):
-            def sendall(self, packet: bytes) -> None:
-                packet_type, flags, payload = parse_packet(packet)
-                self.sent.append((packet_type, flags, payload))
-                if packet_type == 1:
-                    self.buffer += mqtt.mqtt_packet(0x20, b"\x00\x00")
-                elif packet_type == 8:
-                    # SUBACK with return code 0x80: failure.
-                    self.buffer += mqtt.mqtt_packet(0x90, payload[:2] + b"\x80")
-
-        conn = RefusingSubscriptionConnection()
-        with self.assertRaises(mqtt.MqttConnectError):
-            self.publish(conn)
-        # Nothing was published.
-        self.assertEqual([packet_type for packet_type, _flags, _payload in conn.sent], [1, 8])
-
-    def test_broker_hanging_up_on_connect_is_a_connect_error(self):
-        class HangingUpConnection(FakeConnection):
-            def recv(self, length: int) -> bytes:
-                return b""
-
-        with self.assertRaises(mqtt.MqttConnectError):
-            self.publish(HangingUpConnection())
-
-    def test_no_answer_to_connect_in_time_is_not_a_connect_error(self):
-        class SilentConnection(FakeConnection):
-            def sendall(self, packet: bytes) -> None:
-                self.sent.append(parse_packet(packet))
-
-        with self.assertRaises(RuntimeError) as caught:
-            self.publish(SilentConnection())
-        self.assertNotIsInstance(caught.exception, mqtt.MqttConnectError)
-
-    def publish(self, conn):
-        return mqtt.publish_service_on_connection(
-            conn,
-            credentials={"clientId": "c", "mqttUserName": "u", "mqttPassword": "p", "pubTopic": "pub", "subTopic": "sub"},
-            target_uid="717401",
-            from_uid="717422",
-            service_id="request_state",
-            seq=None,
-            timeout=1,
-        )
-
-    def test_collect_stops_at_the_awaited_reply(self):
-        conn = FakeConnection()
-        for packet_id in (9, 10):
-            conn.buffer += mqtt.mqtt_packet(0x32, mqtt.mqtt_utf8("sub/topic") + packet_id.to_bytes(2, "big") + b"reply")
-
-        stopped = mqtt.collect_mqtt_messages(conn, timeout=1, listen_seconds=5, stop_when=lambda decoded: True)
-        rest = mqtt.collect_mqtt_messages(conn, timeout=1, listen_seconds=5)
-
-        self.assertEqual([message["packet_id"] for message in stopped], [9])
-        self.assertEqual([message["packet_id"] for message in rest], [10])
-
-    def test_state_reply_must_come_from_the_target(self):
-        self.assertTrue(mqtt._is_state_reply_from({"risp_cmd": 1021, "from_uid": "717401"}, "717401"))
-        self.assertFalse(mqtt._is_state_reply_from({"risp_cmd": 1021, "from_uid": "999999"}, "717401"))
-        self.assertFalse(mqtt._is_state_reply_from({"receipt_status": "receipt/success", "from_uid": "717401"}, "717401"))
 
     def test_service_ids_map_to_app_operation_ordinals(self):
         services = mqtt.SERVICE_ID_MAP
@@ -315,69 +179,6 @@ class MqttCodecUnitTests(unittest.TestCase):
         self.assertEqual(first, "1867409906781388801")
         self.assertEqual(second, "1867409906781388802")
 
-    def test_mqtt_packet_helpers(self):
-        self.assertEqual(mqtt.mqtt_remaining_length(321).hex(), "c102")
-        self.assertEqual(mqtt.mqtt_packet(0xC0, b"").hex(), "c000")
-
-    def test_parse_mqtt_publish_qos1(self):
-        payload = mqtt.mqtt_utf8("sub/topic") + (7).to_bytes(2, "big") + b"reply"
-
-        topic, qos, message, packet_id = mqtt.parse_mqtt_publish(0b0010, payload)
-
-        self.assertEqual(topic, "sub/topic")
-        self.assertEqual(qos, 1)
-        self.assertEqual(message, b"reply")
-        self.assertEqual(packet_id, 7)
-
-    def test_publish_service_on_connection_connects_subscribes_and_publishes(self):
-        conn = FakeConnection()
-        credentials = {
-            "clientId": "client-id",
-            "mqttUserName": "mqtt-user",
-            "mqttPassword": "mqtt-pass",
-            "pubTopic": "pub/topic",
-            "subTopic": "sub/topic",
-            "uid": "account-uid",
-        }
-
-        parts = mqtt.publish_service_on_connection(
-            conn,
-            credentials=credentials,
-            target_uid="device-uid",
-            service_id="start_clean_up",
-            seq=1,
-            timeout=1,
-        )
-
-        self.assertEqual([packet_type for packet_type, _flags, _payload in conn.sent], [1, 8, 3, 14])
-        self.assertEqual(parts.risp_frame.hex(), "db0b080210fb072004280138018b08011001de")
-        publish_topic, publish_payload_offset = self._decode_utf8(conn.sent[2][2])
-        self.assertEqual(publish_topic, "pub/topic")
-        self.assertIn(parts.command_proto, conn.sent[2][2][publish_payload_offset:])
-
-    def test_publish_service_on_connection_collects_and_acks_incoming_publish(self):
-        conn = FakeReplyConnection()
-        credentials = {
-            "clientId": "client-id",
-            "mqttUserName": "mqtt-user",
-            "mqttPassword": "mqtt-pass",
-            "pubTopic": "pub/topic",
-            "subTopic": "sub/topic",
-            "uid": "account-uid",
-        }
-
-        parts = mqtt.publish_service_on_connection(
-            conn,
-            credentials=credentials,
-            target_uid="device-uid",
-            service_id="request_state",
-            seq=1,
-            timeout=1,
-        )
-
-        self.assertEqual(parts.received_messages[0]["topic"], "sub/topic")
-        self.assertEqual(parts.received_messages[0]["payload_hex"], "7265706c79")
-        self.assertIn(4, [packet_type for packet_type, _flags, _payload in conn.sent])
 
     def test_decode_mqtt_payload_summarizes_receipt(self):
         decoded = mqtt.decode_mqtt_payload_safely(build_receipt_im_message("cid-1", "receipt/success"))
@@ -388,49 +189,61 @@ class MqttCodecUnitTests(unittest.TestCase):
         self.assertEqual(decoded["content_type"], "receipt")
         self.assertEqual(decoded["receipt_status"], "receipt/success")
 
-    def test_publish_service_on_connection_accepts_from_uid_override(self):
-        conn = FakeConnection()
-        credentials = {
-            "client_id": "client-id",
-            "username": "mqtt-user",
-            "password": "mqtt-pass",
-            "pub_topic": "pub/topic",
-            "sub_topic": "sub/topic",
-        }
 
-        parts = mqtt.publish_service_on_connection(
-            conn,
-            credentials=credentials,
-            target_uid="device-uid",
-            from_uid="100",
-            service_id="request_state",
-            seq=1,
-            timeout=1,
+    # Push decoding, ported from bojanrajkovic/upet-hass tests/test_mqtt.py (ae7233b, 57ef90e, b0edf9b).
+
+    def test_state_push_decodes_like_all_state_response(self):
+        # Captured from a real box as a cat stepped in: block, with a cat on the scale.
+        frame = mqtt.build_risp_frame(
+            dev=2, cmd=mqtt.RISP_CMD_STATE_PUSH, attr=6, seq=65, body=bytes.fromhex("1002185a20013001900193a3d6d606")
         )
 
-        self.assertIsNotNone(parts.im_message)
-        self.assertIn(b"100", parts.im_message)
-        self.assertIn(b"device-uid", parts.im_message)
+        decoded = mqtt.summarize_risp_frame(frame)
+
+        self.assertEqual(decoded["risp_cmd"], 1024)
+        self.assertEqual(decoded["w_state_name"], "block")
+        self.assertEqual(decoded["toilet_state"], 1)
+        self.assertEqual(decoded["weigh_state"], 1)
+        self.assertEqual(decoded["timestamp"], 1792381331)
+
+    def test_online_status_notification_decodes_status_and_uid(self):
+        status = mqtt.field_string(1, "status/offline") + mqtt.field_string(2, "1001") + mqtt.field_string(3, "status/offline")
+        any_value = mqtt.encode_any(mqtt.ANY_ONLINE_STATUS_TYPE_URL, status)
+        message = mqtt.field_string(4, "1001") + mqtt.field_string(5, "1001") + mqtt.field_bytes(7, mqtt.encode_message_content("status", any_value))
+
+        decoded = mqtt.summarize_im_message(message)
+
+        self.assertEqual(decoded["content_type"], "status")
+        self.assertEqual(decoded["online_status"], "status/offline")
+        self.assertEqual(decoded["status_uid"], "1001")
+
+    def test_classify_push_routes_each_message_kind(self):
+        boxes = {"2001": "SN1"}
+        cases = [
+            ({"type_url": mqtt.ANY_FORCE_OFFLINE_TYPE_URL, "from_uid": "1"}, mqtt.Kicked()),
+            ({"type_url": mqtt.ANY_ONLINE_STATUS_TYPE_URL, "online_status": "status/online", "status_uid": "2001"}, mqtt.OnlineChange("SN1", True)),
+            ({"type_url": mqtt.ANY_ONLINE_STATUS_TYPE_URL, "online_status": "status/offline", "status_uid": "2001"}, mqtt.OnlineChange("SN1", False)),
+            ({"type_url": mqtt.ANY_ONLINE_STATUS_TYPE_URL, "online_status": "status/online", "status_uid": "9999"}, mqtt.Ignored("unknown status")),
+            ({"from_uid": "2001", "risp_cmd": mqtt.RISP_CMD_RECORD_PUSH}, mqtt.NewRecord("SN1")),
+            ({"from_uid": "2001", "risp_cmd": mqtt.RISP_CMD_CONFIG_REQUEST}, mqtt.ConfigChanged("SN1")),
+            ({"from_uid": "9999", "risp_cmd": mqtt.RISP_CMD_RECORD_PUSH}, mqtt.Ignored("unknown sender")),
+            ({"from_uid": "2001", "risp_cmd": mqtt.RISP_CMD_OPERATION}, mqtt.Ignored("unhandled message")),
+            ({"from_uid": "2001", "content_type": "receipt"}, mqtt.Ignored("receipt")),
+            ({"from_uid": "1", "content_type": "receipt"}, mqtt.Ignored("receipt")),
+        ]
+        for decoded, expected in cases:
+            with self.subTest(decoded=decoded):
+                self.assertEqual(mqtt.classify_push(decoded, boxes), expected)
+
+    def test_classify_push_returns_state_for_pushes_and_replies(self):
+        for cmd in (mqtt.RISP_CMD_STATE_PUSH, mqtt.RISP_CMD_ALL_STATE_RESPONSE):
+            decoded = {"from_uid": "2001", "risp_cmd": cmd, "w_state": 2}
+            with self.subTest(cmd=cmd):
+                self.assertEqual(mqtt.classify_push(decoded, {"2001": "SN1"}), mqtt.StatePush("SN1", decoded))
 
     def test_mqtt_host_from_base_url_strips_scheme_and_path(self):
         self.assertEqual(mqtt.mqtt_host_from_base_url("https://apis.airrobo-home.com/foo"), "apis.airrobo-home.com")
         self.assertEqual(mqtt.mqtt_host_from_base_url("apis.airrobo-home.com/"), "apis.airrobo-home.com")
-
-    def test_mqtt_endpoint_uses_base_url_like_android_app(self):
-        self.assertEqual(
-            mqtt.mqtt_endpoint("https://apis-eu.airrobo-home.com", {"url": "ssl://broker.example.test:21001"}),
-            ("apis-eu.airrobo-home.com", 21000, "base_url"),
-        )
-        self.assertEqual(
-            mqtt.mqtt_endpoint("https://apis-eu.airrobo-home.com", {}),
-            ("apis-eu.airrobo-home.com", 21000, "base_url"),
-        )
-
-    def _decode_utf8(self, payload: bytes, offset: int = 0) -> tuple[str, int]:
-        length = int.from_bytes(payload[offset : offset + 2], "big")
-        start = offset + 2
-        end = start + length
-        return payload[start:end].decode("utf-8"), end
 
 
 if __name__ == "__main__":

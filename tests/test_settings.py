@@ -175,12 +175,36 @@ class RecordingClient:
         return record
 
 
+class FakePush:
+    """The persistent MQTT connection: records what it sends, or refuses like a dropped one."""
+
+    def __init__(self, connected: bool = True, error: Exception | None = None):
+        self.connected = connected
+        self.error = error
+        self.sent: list[tuple[str, str]] = []
+
+    async def async_publish(self, serial, service_id):
+        if self.error is not None:
+            raise self.error
+        self.sent.append((serial, service_id))
+
+
 class FakeCoordinator:
     def __init__(self, item: dict[str, Any]):
         self.data = {"devices": {"SN1": item}}
         self.client = RecordingClient()
+        self.push = FakePush()
         self.refreshes = 0
         self.listener_updates = 0
+        self.guesses: list[dict] = []
+        self.restored: list[dict] = []
+
+    def set_mqtt_work_state(self, serial, state):
+        self.guesses.append(state)
+        return state
+
+    def restore_mqtt_work_state(self, serial, guess):
+        self.restored.append(guess)
 
     async def async_request_refresh(self):
         self.refreshes += 1
@@ -373,6 +397,47 @@ class LowerRakeAvailabilityTests(unittest.TestCase):
     def test_lower_is_off_when_the_rake_is_down(self):
         self.assertFalse(_button(_work("IDLE", "PENDING"), "start_drop").available)
         self.assertFalse(_button(_work("CLEANING", "BLOCKED"), "start_drop").available)
+
+
+class CommandButtonTests(unittest.TestCase):
+    """Commands over the persistent MQTT connection (bojanrajkovic/upet-hass 37ebe31)."""
+
+    def test_commands_wait_for_the_connection(self):
+        entity = _button(_work("IDLE", "PENDING"), "start_clean_up")
+        self.assertTrue(entity.available)
+
+        entity.coordinator.push.connected = False
+
+        self.assertFalse(entity.available)
+        request_state = _button({}, "request_state")
+        self.assertTrue(request_state.available)
+        request_state.coordinator.push.connected = False
+        self.assertFalse(request_state.available)
+
+    def test_rest_and_reset_buttons_do_not_need_the_connection(self):
+        for service_id in (button.REST_REQUEST_SERVICE, button.RESET_WASTE_BIN_SERVICE, button.RESET_DEODORANT_SERVICE):
+            entity = _button({}, service_id)
+            entity.coordinator.push.connected = False
+            with self.subTest(service_id=service_id):
+                self.assertTrue(entity.available)
+
+    def test_a_press_sends_the_command_and_shows_a_guess(self):
+        entity = _button(_work("IDLE", "PENDING"), "start_clean_up")
+
+        asyncio.run(entity.async_press())
+
+        self.assertEqual(entity.coordinator.push.sent, [("SN1", "start_clean_up")])
+        self.assertEqual(entity.coordinator.guesses[0]["w_mode_app_name"], "CLEANING")
+        self.assertEqual(entity.coordinator.restored, [])
+
+    def test_a_send_that_fails_undoes_the_guess(self):
+        entity = _button(_work("IDLE", "PENDING"), "start_clean_up")
+        entity.coordinator.push.error = HomeAssistantError("Not connected")
+
+        with self.assertRaises(HomeAssistantError):
+            asyncio.run(entity.async_press())
+
+        self.assertEqual(entity.coordinator.restored, entity.coordinator.guesses)
 
 
 class ResetDeodorantButtonTests(unittest.TestCase):

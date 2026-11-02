@@ -6,9 +6,8 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntry
-from homeassistant.helpers.event import async_call_later
 
 from .api import DEFAULT_RECORDS_PER_FETCH, UbpetClient
 from .const import (
@@ -31,39 +30,30 @@ from .const import (
 )
 from .coordinator import UbpetDataUpdateCoordinator
 from .profiles import PROFILE_UPET, get_profile
+from .push import UbpetPush
 from .registry import still_reported
 
 _LOGGER = logging.getLogger(__name__)
-MQTT_POLL_START_DELAY_SECONDS = 30
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = UbpetDataUpdateCoordinator(hass, entry, client_from_entry_data(entry.data, entry.options))
+    coordinator.push = UbpetPush(hass, coordinator)
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_apply_options))
 
-    @callback
-    def _enable_mqtt_state_polls(_now) -> None:
-        coordinator.enable_mqtt_state_polls()
+    # The persistent MQTT connection (bojanrajkovic/upet-hass 37ebe31). Started in the background,
+    # so a slow or unreachable cloud never holds up setup; until it connects, the REST update
+    # still runs and the box's command buttons wait.
+    entry.async_create_background_task(hass, coordinator.push.async_start(), "ubpet mqtt push")
 
-    entry.async_on_unload(
-        async_call_later(
-            hass,
-            MQTT_POLL_START_DELAY_SECONDS,
-            _enable_mqtt_state_polls,
-        )
-    )
+    async def _stop_push(_event) -> None:
+        await coordinator.push.async_stop()
 
-    @callback
-    def _stop_mqtt_state_polls(_event) -> None:
-        coordinator.cancel_mqtt_state_polls()
-
-    entry.async_on_unload(
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_mqtt_state_polls)
-    )
+    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_push))
     return True
 
 
@@ -112,8 +102,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         coordinator = hass.data[DOMAIN].pop(entry.entry_id, None)
-        if coordinator is not None:
-            coordinator.cancel_mqtt_state_polls()
+        if coordinator is not None and coordinator.push is not None:
+            await coordinator.push.async_stop()
     return unload_ok
 
 
