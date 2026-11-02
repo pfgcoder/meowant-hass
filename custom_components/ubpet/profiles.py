@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 try:
     from . import secrets as _secrets
@@ -90,3 +92,16 @@ def uses_fixed_host(profile_id: str) -> bool:
     """Meowant stays on its own host. UPET picks a host from the country."""
 
     return get_profile(profile_id).profile_id != PROFILE_UPET
+
+
+def account_unique_id(app_id: str, account: str) -> str:
+    """The config entry's unique ID. The same account typed with other spacing or capitals is the same."""
+
+    return f"{app_id.strip()}:{account.strip().lower()}"
+
+
+def missing_boxes(current_serials: Iterable[str], devices: Iterable[Any]) -> list[str]:
+    """The boxes the integration has now that another account's device list doesn't report."""
+
+    reported = {device.get("serialNumber") for device in devices if isinstance(device, dict)}
+    return sorted(serial for serial in current_serials if serial not in reported)

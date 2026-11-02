@@ -17,6 +17,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .box_config import empty_waste_bin_reminder_config
 from .const import DOMAIN
 from .coordinator import UbpetDataUpdateCoordinator
+from .writes import async_write_setting
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -220,7 +221,7 @@ class UbpetDeodorantAlertSwitch(UbpetBaseSwitch):
         await self._set_deodorant_alert(False)
 
     async def _set_deodorant_alert(self, enabled: bool) -> None:
-        await self.hass.async_add_executor_job(self.coordinator.client.set_deodorant_alert, self._serial, enabled)
+        await async_write_setting(self.hass, self.entity_description.name, self.coordinator.client.set_deodorant_alert, self._serial, enabled)
         await self.coordinator.async_request_refresh()
 
 
@@ -254,7 +255,9 @@ class UbpetAutoCleanSwitch(UbpetBaseSwitch):
                 "The auto clean delay isn't known right now, so auto clean can't be changed without "
                 "resetting it. Try again after the next update."
             )
-        await self.hass.async_add_executor_job(
+        await async_write_setting(
+            self.hass,
+            self.entity_description.name,
             self.coordinator.client.set_auto_clean_enabled,
             self._serial,
             enabled,
@@ -287,7 +290,9 @@ class UbpetEmptyWasteBinReminderSwitch(UbpetBaseSwitch):
         config = self._reminder_config
         if not config:
             return
-        await self.hass.async_add_executor_job(
+        await async_write_setting(
+            self.hass,
+            self.entity_description.name,
             partial(
                 self.coordinator.client.set_time_point,
                 self._serial,
@@ -334,7 +339,9 @@ class UbpetFunctionSwitch(UbpetBaseSwitch):
         await self._set(False)
 
     async def _set(self, enabled: bool) -> None:
-        await self.hass.async_add_executor_job(
+        await async_write_setting(
+            self.hass,
+            self.entity_description.name,
             self.coordinator.client.set_function_switch, self._serial, self.entity_description.function_type, enabled
         )
         # The vendor only reports the new value once the box applies it, so a refresh right
@@ -383,7 +390,9 @@ class UbpetPeriodSwitch(UbpetBaseSwitch):
         config_id = _period_config_id(config, self.entity_description.config_list_key)
         if config_id is None:
             return
-        await self.hass.async_add_executor_job(
+        await async_write_setting(
+            self.hass,
+            self.entity_description.name,
             partial(
                 self.coordinator.client.set_time_period,
                 self._serial,

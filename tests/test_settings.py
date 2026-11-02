@@ -100,10 +100,12 @@ def load_platforms():
             sys.modules[spec.name] = module
             spec.loader.exec_module(module)
             platforms[name] = module
-    return platforms["switch"], platforms["number"], platforms["button"]
+        # The real api.py, loaded through writes.py, for its error classes.
+        platforms["api"] = sys.modules[f"{PACKAGE_NAME}.api"]
+    return platforms["switch"], platforms["number"], platforms["button"], platforms["api"]
 
 
-switch, number, button = load_platforms()
+switch, number, button, api = load_platforms()
 
 
 class FakeClient:
@@ -255,6 +257,73 @@ class FunctionSwitchTests(unittest.TestCase):
 
         keys = {e.entity_description.key for e in added if isinstance(e, switch.UbpetFunctionSwitch)}
         self.assertEqual(keys, {"child_lock", "shake_mode", "box_full_alert"})
+
+
+class RefusingClient:
+    """Refuses every call, as the vendor does for a change the account may not make."""
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+    def __getattr__(self, name):
+        def refuse(*args):
+            raise self.error
+
+        return refuse
+
+
+def _permission_error():
+    return api.UbpetPermissionError(200, {"code": 500, "message": "没有修改权限"})
+
+
+class RefusedChangeTests(unittest.TestCase):
+    def setUp(self):
+        SCHEDULED.clear()
+
+    def test_a_refused_child_lock_reads_plainly_and_changes_nothing(self):
+        entity = _function_switch("child_lock", {"controlBoardSwitch": 1})
+        entity.coordinator.client = RefusingClient(_permission_error())
+
+        with self.assertRaises(HomeAssistantError) as caught:
+            asyncio.run(entity.async_turn_off())
+
+        message = str(caught.exception)
+        self.assertIn('"Child lock"', message)
+        self.assertIn("owner", message)
+        self.assertNotIn("没有修改权限", message)
+        # The switch stays as the box has it, with nothing to confirm later.
+        self.assertTrue(entity.is_on)
+        self.assertEqual(entity.coordinator.listener_updates, 0)
+        self.assertEqual(SCHEDULED, [])
+
+    def test_other_settings_get_the_same_readable_refusal(self):
+        entity, _ = _entity(switch.UbpetAutoCleanSwitch, {"lazyTime": 900, "sensorSwitch": 1})
+        entity.coordinator.client = RefusingClient(_permission_error())
+
+        with self.assertRaises(HomeAssistantError) as caught:
+            asyncio.run(entity.async_turn_off())
+
+        self.assertIn('"Auto clean"', str(caught.exception))
+
+    def test_a_refused_reset_reads_plainly(self):
+        entity = _button({}, button.RESET_DEODORANT_SERVICE)
+        entity.coordinator.client = RefusingClient(_permission_error())
+
+        with self.assertRaises(HomeAssistantError) as caught:
+            asyncio.run(entity.async_press())
+
+        self.assertIn('"Reset deodorant"', str(caught.exception))
+        self.assertEqual(entity.coordinator.refreshes, 0)
+
+    def test_other_vendor_errors_pass_through_unchanged(self):
+        entity = _function_switch("child_lock", {"controlBoardSwitch": 1})
+        busy = api.UbpetApiError(200, {"code": 500, "message": "系统繁忙"})
+        entity.coordinator.client = RefusingClient(busy)
+
+        with self.assertRaises(api.UbpetApiError) as caught:
+            asyncio.run(entity.async_turn_off())
+
+        self.assertIs(caught.exception, busy)
 
 
 class BoxFullAlertNumberTests(unittest.TestCase):

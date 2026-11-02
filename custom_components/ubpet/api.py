@@ -76,6 +76,15 @@ class UbpetAuthError(UbpetLoginError):
     """The server refused the login itself (account or password), rather than being unreachable."""
 
 
+class UbpetPermissionError(UbpetApiError):
+    """The account may not make this change.
+
+    A box shared with an account can be run from it, and most settings change from it too, but
+    some only change for the box's owner: the child lock came back as code 500, 没有修改权限
+    ("no permission to modify"), while auto clean and the waste-bin alert changed fine.
+    """
+
+
 @dataclass(slots=True)
 class UbpetAuth:
     token: str
@@ -563,7 +572,17 @@ def _raise_for_api_error(status: int, data: Any) -> None:
     if isinstance(data, dict):
         code = data.get("code")
         if code not in (None, 0):
+            if _is_permission_refusal(data):
+                raise UbpetPermissionError(status, data)
             raise UbpetApiError(status, data)
+
+
+def _is_permission_refusal(data: dict[str, Any]) -> bool:
+    # Code 500 is the vendor's catch-all, so only its permission message counts.
+    message = data.get("message") or data.get("msg")
+    if data.get("code") != 500 or not isinstance(message, str):
+        return False
+    return "权限" in message or "permission" in message.lower()
 
 
 def _response_data(payload: Any) -> Any:

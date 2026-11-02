@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .box_config import empty_waste_bin_reminder_config
 from .const import DOMAIN
 from .coordinator import UbpetDataUpdateCoordinator
+from .writes import async_write_setting
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -140,7 +141,9 @@ class UbpetPeriodTime(CoordinatorEntity[UbpetDataUpdateCoordinator], TimeEntity)
             end_hour = value.hour
             end_minute = value.minute
 
-        await self.hass.async_add_executor_job(
+        await async_write_setting(
+            self.hass,
+            self.entity_description.name,
             partial(
                 self.coordinator.client.set_time_period,
                 self._serial,
@@ -206,7 +209,9 @@ class UbpetEmptyWasteBinReminderTime(CoordinatorEntity[UbpetDataUpdateCoordinato
         config = self._reminder_config
         if not config:
             return
-        await self.hass.async_add_executor_job(
+        await async_write_setting(
+            self.hass,
+            self.entity_description.name,
             partial(
                 self.coordinator.client.set_time_point,
                 self._serial,

@@ -55,5 +55,32 @@ class AccountProfileTests(unittest.TestCase):
         self.assertEqual(profiles.DEFAULT_PROFILE, profiles.PROFILE_MEOWANT)
 
 
+class AccountChangeTests(unittest.TestCase):
+    def test_the_same_account_typed_differently_has_the_same_unique_id(self):
+        self.assertEqual(
+            profiles.account_unique_id(" app1 ", " Someone@Example.com "),
+            profiles.account_unique_id("app1", "someone@example.com"),
+        )
+
+    def test_another_account_has_another_unique_id(self):
+        self.assertNotEqual(
+            profiles.account_unique_id("app1", "owner@example.com"),
+            profiles.account_unique_id("app1", "shared@example.com"),
+        )
+
+    def test_an_account_that_sees_every_box_misses_none(self):
+        devices = [{"serialNumber": "SN1"}, {"serialNumber": "SN2"}]
+
+        self.assertEqual(profiles.missing_boxes({"SN1"}, devices), [])
+
+    def test_boxes_the_new_account_doesnt_see_are_listed(self):
+        devices = [{"serialNumber": "SN2"}, "not a device"]
+
+        self.assertEqual(profiles.missing_boxes({"SN3", "SN1", "SN2"}, devices), ["SN1", "SN3"])
+
+    def test_nothing_to_compare_misses_nothing(self):
+        self.assertEqual(profiles.missing_boxes(set(), []), [])
+
+
 if __name__ == "__main__":
     unittest.main()

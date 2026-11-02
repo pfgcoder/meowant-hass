@@ -110,6 +110,11 @@ any account type the login tries, or a "no such account" code (1009, 2004, 2010,
 or 2042) from every one of them. Other login failures, such as a rate limit or an outage,
 are retried at the next update instead.
 
+To log in with another account, or with a new password, without removing the integration, use
+`Reconfigure` in the entry's menu under `Settings -> Devices & services -> Meowant`. The new
+account has to see the same litter boxes, so the entities, their IDs and their history stay. This
+is how to move between a shared account and the box owner's (see Limitations).
+
 If one of the calls behind the sensors fails (the box's settings, use times, deodorant,
 online status, records or the cat list), its sensors keep their last values for up to an
 hour, then show unknown. The log has a warning when a call starts failing and an info line
@@ -247,6 +252,12 @@ Confirmed operation ordinals:
 - The integration depends on the vendor cloud and vendor IM/MQTT service.
 - Commands are confirmed by MQTT delivery/status responses, but full semantic validation of every receipt/error cause is not complete.
 - The box only reports a changed setting once it applies it, so the child lock, waste-bin full alert, shake mode and foreign object detection switches show the new value at once and confirm it with a refresh 15 seconds later.
+- On an account the box is shared with, the vendor refuses some settings changes that only the
+  box's owner may make (`code=500`, `没有修改权限`, "no permission to modify"). The child lock is
+  one; auto clean, its delay, the deodorant alert and the waste-bin full alert change fine. The
+  Air Pet app refuses the same on a shared account ("The shared device is currently not
+  authorized to operate"). The refused change shows a readable error, and the setting stays as it was. Change it in the app
+  with the owner's account, or reconfigure the integration with that account.
 - Deodorize, direct light control, and camera toggle are not implemented yet.
 
 ## Development

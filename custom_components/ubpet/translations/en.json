@@ -40,17 +40,32 @@
         "data": {
           "password": "Password"
         }
+      },
+      "reconfigure": {
+        "title": "Change account",
+        "description": "Log in with another Air Pet account that sees the same litter boxes, such as the owner's account or one the box is shared with, or enter a new password. The entities and their history stay. Current account: {account}.",
+        "data": {
+          "country": "Country",
+          "username": "Account",
+          "password": "Password",
+          "app_key": "App key",
+          "base_url": "Base URL",
+          "app_id": "App ID",
+          "product": "Product"
+        }
       }
     },
     "error": {
       "auth_failed": "Authentication failed. Check account and password.",
       "cannot_connect": "Could not connect to the UPET API.",
       "unknown": "Unexpected error. Check Home Assistant logs.",
-      "missing_required": "Choose the country from the phone app, then enter the account and password."
+      "missing_required": "Choose the country from the phone app, then enter the account and password.",
+      "different_boxes": "That account doesn't see every litter box this integration has, so their entities would stop updating. Use an account that sees the same boxes."
     },
     "abort": {
       "already_configured": "This account is already configured.",
-      "reauth_successful": "Logged in again. The integration has reloaded."
+      "reauth_successful": "Logged in again. The integration has reloaded.",
+      "reconfigure_successful": "Account changed. The integration has reloaded."
     }
   },
   "options": {

@@ -442,6 +442,42 @@ class ApiUnitTests(unittest.TestCase):
             {"serialNumber": "SN123", "functionType": 0, "controlSwitch": 0, "optionInt": 1},
         )
 
+    def _refused(self, reply: dict):
+        recorder = UrlopenRecorder(
+            [
+                (
+                    200,
+                    {
+                        "token": {"token": "auth-token", "refreshToken": None, "expireAt": 9999999999999},
+                        "user": {"userId": 100},
+                    },
+                ),
+                (200, reply),
+            ]
+        )
+        with patch.object(api.urllib.request, "urlopen", recorder):
+            with self.assertRaises(api.UbpetApiError) as caught:
+                self.make_client().set_function_switch("SN123", 0, False)
+        return caught.exception
+
+    def test_a_shared_account_refused_the_child_lock_is_a_permission_error(self):
+        # As the vendor answered on 11-02 for an account the box is shared with.
+        err = self._refused({"code": 500, "message": "没有修改权限", "data": None, "success": False})
+
+        self.assertIsInstance(err, api.UbpetPermissionError)
+        # Not a login problem, so it mustn't ask for the password again.
+        self.assertNotIsInstance(err, api.UbpetLoginError)
+
+    def test_an_english_permission_message_counts_too(self):
+        err = self._refused({"code": 500, "message": "No permission to modify", "success": False})
+
+        self.assertIsInstance(err, api.UbpetPermissionError)
+
+    def test_other_code_500_replies_stay_plain_api_errors(self):
+        err = self._refused({"code": 500, "message": "系统繁忙", "success": False})
+
+        self.assertNotIsInstance(err, api.UbpetPermissionError)
+
     def test_set_box_full_alert_sends_threshold(self):
         recorder = UrlopenRecorder(
             [

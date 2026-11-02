@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import UbpetDataUpdateCoordinator
+from .writes import async_write_setting
 
 AUTO_CLEAN_DELAY = NumberEntityDescription(
     key="auto_clean_delay",
@@ -75,7 +76,9 @@ class UbpetAutoCleanDelayNumber(CoordinatorEntity[UbpetDataUpdateCoordinator], N
                 "Whether auto clean is on isn't known right now, so the delay can't be set without "
                 "changing it. Try again after the next update."
             )
-        await self.hass.async_add_executor_job(
+        await async_write_setting(
+            self.hass,
+            self.entity_description.name,
             self.coordinator.client.set_auto_clean_delay,
             self._serial,
             minutes,
@@ -131,7 +134,7 @@ class UbpetBoxFullAlertNumber(CoordinatorEntity[UbpetDataUpdateCoordinator], Num
         return float(self._use_times.get("boxFullMax") or 30)
 
     async def async_set_native_value(self, value: float) -> None:
-        await self.hass.async_add_executor_job(self.coordinator.client.set_box_full_alert, self._serial, int(round(value)))
+        await async_write_setting(self.hass, self.entity_description.name, self.coordinator.client.set_box_full_alert, self._serial, int(round(value)))
         await self.coordinator.async_request_refresh()
 
 

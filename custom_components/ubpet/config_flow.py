@@ -33,10 +33,28 @@ from .profiles import (
     DEFAULT_PROFILE,
     PROFILE_MEOWANT,
     PROFILE_UPET,
+    account_unique_id,
     area_code_for,
     get_profile,
+    missing_boxes,
     requires_country,
     uses_fixed_host,
+)
+
+# Entry data that belongs to the account. Reconfigure replaces these and keeps anything else.
+_ACCOUNT_KEYS = frozenset(
+    {
+        "account",
+        "password",
+        CONF_COUNTRY,
+        CONF_AREA_CODE,
+        CONF_APP_KEY,
+        CONF_APP_ID,
+        CONF_BASE_URL,
+        CONF_PRODUCT,
+        CONF_DEVICE_ID,
+        CONF_PROFILE,
+    }
 )
 
 
@@ -222,33 +240,17 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         devices: list[dict[str, Any]],
         country: str,
     ):
-        app_id = _clean_required_string(connection_data[CONF_APP_ID])
-        # The same account typed with other spacing or capitals is still the same account.
-        account_key = _clean_required_string(user_input[CONF_USERNAME]).lower()
-        await self.async_set_unique_id(f"{app_id}:{account_key}")
+        await self.async_set_unique_id(
+            account_unique_id(
+                _clean_required_string(connection_data[CONF_APP_ID]),
+                _clean_required_string(user_input[CONF_USERNAME]),
+            )
+        )
         self._abort_if_unique_id_configured()
         title = profile.label
         if devices:
             title = devices[0].get("deviceName") or devices[0].get("serialNumber") or title
-        entry_data = {
-            "account": _clean_required_string(user_input[CONF_USERNAME]),
-            "password": _clean_required_string(user_input[CONF_PASSWORD]),
-            CONF_DEVICE_ID: connection_data[CONF_DEVICE_ID],
-            CONF_PROFILE: profile.profile_id,
-        }
-        if country:
-            entry_data[CONF_COUNTRY] = country
-            entry_data[CONF_AREA_CODE] = country
-        if not all((profile.app_key, profile.app_id, profile.base_url, profile.product)):
-            entry_data.update(
-                {
-                    CONF_APP_KEY: _clean_required_string(connection_data[CONF_APP_KEY]),
-                    CONF_APP_ID: app_id,
-                    CONF_BASE_URL: _clean_required_string(connection_data[CONF_BASE_URL]),
-                    CONF_PRODUCT: _clean_required_string(connection_data[CONF_PRODUCT]),
-                }
-            )
-        return self.async_create_entry(title=title, data=entry_data)
+        return self.async_create_entry(title=title, data=_entry_data(profile, user_input, connection_data, country))
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]):
         return await self.async_step_reauth_confirm()
@@ -281,6 +283,77 @@ class UbpetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                     ),
                 }
+            ),
+            description_placeholders={"account": entry.data.get("account", "")},
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None):
+        """Log in with another account, or a new password, without removing the integration.
+
+        The entry, its entities and their history stay, so the new account has to see the same
+        boxes. Not every setting changes from an account the box is shared with (the child lock
+        is the owner's), so this is how to move between the owner's account and a shared one.
+        """
+        entry = self._get_reconfigure_entry()
+        profile = get_profile(entry.data.get(CONF_PROFILE) or DEFAULT_PROFILE)
+        fixed_host = uses_fixed_host(profile.profile_id)
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            country = _iso_country(user_input.get(CONF_COUNTRY)) or ""
+            if not fixed_host and country not in SUPPORTED_COUNTRIES:
+                country = ""
+            if requires_country(profile.profile_id) and not country:
+                errors["base"] = "missing_required"
+            else:
+                try:
+                    connection_data = {
+                        **_connection_data(profile, user_input, country),
+                        # Still the same Home Assistant, so keep its device ID.
+                        CONF_DEVICE_ID: entry.data.get(CONF_DEVICE_ID) or uuid.uuid4().hex,
+                    }
+                    devices = await self.hass.async_add_executor_job(_validate_input, connection_data)
+                    unique_id = account_unique_id(
+                        _clean_required_string(connection_data[CONF_APP_ID]),
+                        _clean_required_string(user_input[CONF_USERNAME]),
+                    )
+                except ValueError:
+                    errors["base"] = "missing_required"
+                except UbpetAuthError:
+                    errors["base"] = "auth_failed"
+                except (OSError, UbpetApiError):
+                    errors["base"] = "cannot_connect"
+                except Exception:
+                    errors["base"] = "unknown"
+                else:
+                    if any(
+                        other.entry_id != entry.entry_id and other.unique_id == unique_id
+                        for other in self._async_current_entries(include_ignore=False)
+                    ):
+                        return self.async_abort(reason="already_configured")
+                    if missing_boxes(_current_serials(self.hass, entry), devices):
+                        # Their entities would go unavailable, so keep the account that sees them.
+                        errors["base"] = "different_boxes"
+                    else:
+                        kept = {key: value for key, value in entry.data.items() if key not in _ACCOUNT_KEYS}
+                        return self.async_update_reload_and_abort(
+                            entry,
+                            unique_id=unique_id,
+                            data={**kept, **_entry_data(profile, user_input, connection_data, country)},
+                        )
+
+        defaults = user_input or {
+            CONF_USERNAME: entry.data.get("account", ""),
+            CONF_COUNTRY: entry.data.get(CONF_COUNTRY),
+            **{key: entry.data[key] for key in (CONF_APP_KEY, CONF_APP_ID, CONF_PRODUCT) if key in entry.data},
+        }
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=_account_schema(
+                defaults,
+                profile=profile,
+                allowed_countries=None if fixed_host else SUPPORTED_COUNTRIES,
+                default_country=entry.data.get(CONF_COUNTRY),
             ),
             description_placeholders={"account": entry.data.get("account", "")},
             errors=errors,
@@ -328,6 +401,36 @@ def _connection_data(profile, user_input: dict[str, Any], country: str) -> dict[
         CONF_PRODUCT: profile.product or user_input.get(CONF_PRODUCT),
         CONF_DEVICE_ID: uuid.uuid4().hex,
     }
+
+
+def _entry_data(profile, user_input: dict[str, Any], connection_data: dict[str, Any], country: str) -> dict[str, Any]:
+    entry_data = {
+        "account": _clean_required_string(user_input[CONF_USERNAME]),
+        "password": _clean_required_string(user_input[CONF_PASSWORD]),
+        CONF_DEVICE_ID: connection_data[CONF_DEVICE_ID],
+        CONF_PROFILE: profile.profile_id,
+    }
+    if country:
+        entry_data[CONF_COUNTRY] = country
+        entry_data[CONF_AREA_CODE] = country
+    if not all((profile.app_key, profile.app_id, profile.base_url, profile.product)):
+        entry_data.update(
+            {
+                CONF_APP_KEY: _clean_required_string(connection_data[CONF_APP_KEY]),
+                CONF_APP_ID: _clean_required_string(connection_data[CONF_APP_ID]),
+                CONF_BASE_URL: _clean_required_string(connection_data[CONF_BASE_URL]),
+                CONF_PRODUCT: _clean_required_string(connection_data[CONF_PRODUCT]),
+            }
+        )
+    return entry_data
+
+
+def _current_serials(hass, entry) -> set[str]:
+    """The boxes the entry has now; none when it isn't loaded, so there's nothing to compare."""
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    data = getattr(coordinator, "data", None)
+    devices = data.get("devices") if isinstance(data, dict) else None
+    return set(devices) if isinstance(devices, dict) else set()
 
 
 def _validate_input(data: dict[str, Any]) -> list[dict[str, Any]]:

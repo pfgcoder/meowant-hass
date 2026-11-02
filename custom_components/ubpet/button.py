@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import UbpetDataUpdateCoordinator
+from .writes import async_write_setting
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -190,12 +191,12 @@ class UbpetMqttCommandButton(CoordinatorEntity[UbpetDataUpdateCoordinator], Butt
             await self.coordinator.async_request_refresh()
             return
         if self.entity_description.service_id == RESET_DEODORANT_SERVICE:
-            await self.hass.async_add_executor_job(self.coordinator.client.reset_deodorant, self._serial)
+            await async_write_setting(self.hass, self.entity_description.name, self.coordinator.client.reset_deodorant, self._serial)
             _LOGGER.info("Reset UPET deodorant countdown for serial=%s", self._serial)
             await self.coordinator.async_request_refresh()
             return
         if self.entity_description.service_id == RESET_WASTE_BIN_SERVICE:
-            await self.hass.async_add_executor_job(self.coordinator.client.reset_box_use_times, self._serial)
+            await async_write_setting(self.hass, self.entity_description.name, self.coordinator.client.reset_box_use_times, self._serial)
             _LOGGER.info("Reset UPET waste-bin counter for serial=%s", self._serial)
             await self.coordinator.async_request_refresh()
             return
