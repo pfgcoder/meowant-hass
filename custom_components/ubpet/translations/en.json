@@ -165,6 +165,27 @@
       },
       "camera_switch": {
         "name": "Camera enabled"
+      },
+      "cover_open": {
+        "name": "Cover open"
+      },
+      "part_not_in_place": {
+        "name": "Part not in place"
+      },
+      "motor_stuck": {
+        "name": "Motor stuck"
+      },
+      "scale_fault": {
+        "name": "Scale fault"
+      },
+      "camera_fault": {
+        "name": "Camera fault"
+      },
+      "light": {
+        "name": "Light"
+      },
+      "firmware_updating": {
+        "name": "Firmware updating"
       }
     },
     "number": {

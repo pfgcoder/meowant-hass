@@ -187,13 +187,13 @@ class LastUsedByTests(unittest.TestCase):
         self.assertIsNone(entity.native_value)
 
 
-def _set_up(cats: list[dict[str, Any]]):
+def _set_up(cats: list[dict[str, Any]], box: dict[str, Any] | None = None):
     """Set up the sensor platform; returns the coordinator, the entities added and its update listeners."""
     import asyncio
 
     listeners = []
     coordinator = types.SimpleNamespace(
-        data={"devices": {"SN1": {}}, "cats": cats},
+        data={"devices": {"SN1": box or {}}, "cats": cats},
         async_add_listener=lambda listener: listeners.append(listener) or (lambda: None),
     )
     hass = types.SimpleNamespace(data={"ubpet": {"entry": coordinator}})
@@ -215,6 +215,17 @@ class SetupTests(unittest.TestCase):
         classes = {entity.entity_description.key: type(entity) for entity in added}
         self.assertIs(classes["last_used_by"], sensor.UbpetLastUsedBySensor)
         self.assertIs(classes["visits_today"], sensor.UbpetDeviceSensor)
+
+    def test_reminder_days_only_on_a_box_with_the_reminder(self):
+        def keys(box):
+            return {entity.entity_description.key for entity in _set_up([], box)[1]}
+
+        reminder = {"notifyConfigList": [{"type": 4, "notifyConfigId": 7, "period": 127}]}
+        self.assertIn("empty_waste_bin_reminder_days", keys({"config": reminder}))
+        self.assertNotIn("empty_waste_bin_reminder_days", keys({"config": {"sensorSwitch": 1}}))
+        # The config failed to load at startup, so it stays.
+        self.assertIn("empty_waste_bin_reminder_days", keys({"config": {}}))
+        self.assertIn("visits_today", keys({"config": {"sensorSwitch": 1}}))
 
     def test_adds_a_cats_sensors_once_when_the_cat_list_loads_after_setup(self):
         # The cat list failed to load at setup, which leaves it empty.
@@ -283,14 +294,15 @@ class WasteBinReminderTests(unittest.TestCase):
 
 
 class AttributeTests(unittest.TestCase):
-    def test_mqtt_sensors_show_only_state_fields_that_hold_still(self):
+    def test_mqtt_sensors_show_the_state_fields_but_not_the_box_clock(self):
         item = {
             "mqtt_state": {
                 "w_mode": 0,
                 "w_state_app_name": "PENDING",
                 "w_cause": 90,
                 "timestamp": 1793034925,
-                "weigh_sensor": 4321,
+                # A scale fault flag, not a live reading, so it's shown.
+                "weigh_sensor": 1,
                 "message": {"cid": "cid-1"},
                 "guess": {"at": 1.0},
             }
@@ -299,7 +311,9 @@ class AttributeTests(unittest.TestCase):
         attributes = _device_sensor("mqtt_work_state", item).extra_state_attributes
 
         # A guess shows as a flag only, not its press time.
-        self.assertEqual(attributes, {"w_mode": 0, "w_state_app_name": "PENDING", "w_cause": 90, "guessed": True})
+        self.assertEqual(
+            attributes, {"w_mode": 0, "w_state_app_name": "PENDING", "w_cause": 90, "weigh_sensor": 1, "guessed": True}
+        )
 
     def test_box_status_marks_a_guessed_state_until_the_box_replies(self):
         guessed = {"mqtt_state": {"w_state_app_name": "RUNNING", "guess": {"at": 1.0}}}

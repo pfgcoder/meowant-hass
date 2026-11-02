@@ -157,6 +157,24 @@ Device binary sensors:
 - Deodorant expired.
 - Sensor enabled.
 - Camera enabled.
+- Problems, from the box's pushed state: Cover open (`lid_state`), Part not in place
+  (`box_state`), Motor stuck (`motor_state`, with the stuck `position`), Scale fault
+  (`weigh_sensor`) and Camera fault (`camera_state`).
+- Light (`led_state`) and Firmware updating (`update_state`).
+
+The problem sensors follow bojanrajkovic/upet-hass's mapping for the MW-SC02, a drum box, where
+`box_state` is the drum not in place and `motor_state` is the drum stuck. The app words the four
+positions there as clumps at the start position (1), in the litter bin (2), in the litter bin's
+rotation section (3), or blocking the waste bin (4). The SC03, a rake box, hasn't reported any of
+these fields yet, so which part `box_state` and `motor_state` mean on it isn't known; the names
+stay neutral until one shows up. They're unknown until the box first sends its state, after
+connecting.
+
+Entities only appear for hardware the box has: the camera entities need the `cat_face_upload`
+capability (from `/catbox-server/box/config/device/capabilities`), the light needs a
+`lightSwitch` in the box config, and the empty-waste-bin reminder needs a reminder config. A
+part that failed to load at startup keeps the entities. Ported from bojanrajkovic/upet-hass
+(ad084ff); the rake buttons stay enabled, unlike there, since the SC03 has a rake.
 
 Device controls:
 
@@ -259,7 +277,7 @@ account. The boxes push to every account they're linked to:
 
 | Push | What happens |
 | --- | --- |
-| Work state (RISP `0x400`) | Work mode, work state and Box status update at once. |
+| Work state (RISP `0x400`) | Work mode, work state, Box status and the problem sensors update at once. |
 | New record (RISP `0x3ff`) | Visit and clean records are fetched 3 seconds later. |
 | Settings request (RISP `0x9e7`) | The box picked up a settings change, from the app, the box or Home Assistant. Settings are fetched 3 seconds later. |
 | Online status | The box's Online sensor updates at once. |

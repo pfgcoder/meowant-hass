@@ -101,6 +101,7 @@ class UbpetClient:
         self.signer = UbtV2Signer(app_key)
         self.auth: UbpetAuth | None = None
         self._auth_lock = threading.Lock()
+        self._capabilities: dict[str, dict[str, Any]] = {}
 
     def ensure_login(self) -> UbpetAuth:
         if auth := self._usable_auth():
@@ -195,6 +196,17 @@ class UbpetClient:
     def get_devices(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/user-service-rest/v2/robot/common/device/list", auth=True)
         return _require_list(data)
+
+    def get_capabilities(self, serial_number: str) -> dict[str, Any]:
+        """Optional features the box has, such as camera-based cat recognition (cat_face_upload).
+
+        They don't change, so each box's are fetched until one call works, then kept.
+        Ported from bojanrajkovic/upet-hass (ad084ff).
+        """
+        if serial_number not in self._capabilities:
+            path = f"/catbox-server/box/config/device/capabilities?sn={_quote(serial_number)}"
+            self._capabilities[serial_number] = _require_dict(self._request("GET", path, auth=True))
+        return self._capabilities[serial_number]
 
     def get_all_config(self, serial_number: str) -> dict[str, Any]:
         data = self._request(
@@ -367,6 +379,8 @@ class UbpetClient:
                 "box_use_times": _optional_call(self.get_box_use_times, serial),
                 "deodorant": _optional_call(self.get_deodorant_status, serial),
                 "online": _optional_call(self.get_device_online, serial),
+                # Only read when entities are set up, and None (keep every entity) if it failed.
+                "capabilities": _optional_call(self.get_capabilities, serial),
                 # Visits, then cleans.
                 "cat_records": _optional_call(self.get_box_records, serial, 0, self.records_per_fetch),
                 "device_records": _optional_call(self.get_box_records, serial, 1, self.records_per_fetch),

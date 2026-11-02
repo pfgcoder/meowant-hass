@@ -15,7 +15,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .box_config import empty_waste_bin_reminder_config
+from .box_config import empty_waste_bin_reminder_config, has_waste_bin_reminder
 from .const import DOMAIN
 from .coordinator import UbpetDataUpdateCoordinator
 from .mqtt import STATE_FIELD_NAMES
@@ -24,6 +24,8 @@ from .mqtt import STATE_FIELD_NAMES
 @dataclass(frozen=True, kw_only=True)
 class UbpetSensorDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], Any]
+    # Whether the box has the feature; None means every box does.
+    supported_fn: Callable[[dict[str, Any]], bool] | None = None
 
 
 # Record eventTypes. Cat records: 3 is a visit matched to a cat (21 is a weight the box couldn't
@@ -35,9 +37,11 @@ AUTO_CLEANED_EVENT = 31
 # day, such as a record falling out of the fetched window, isn't read as a new meter cycle.
 TODAY_COUNT_KEYS = {"visits_today", "cleans_today", "cat_visits_today"}
 
-# The box's state fields shown on the MQTT sensors, less the box's clock and the live scale reading,
-# which change on every poll: an unchanged poll then doesn't write a new state row.
-MQTT_ATTRIBUTE_FIELDS = STATE_FIELD_NAMES - {"timestamp", "weigh_sensor"}
+# The box's state fields shown on the MQTT sensors, less the box's clock, which changes on every
+# reply: an unchanged state then doesn't write a new state row. weigh_sensor isn't a live scale
+# reading as once thought: the SC03 leaves it out (0) even with a cat on the scale, and the
+# MW-SC02's app reads 1 as a scale fault.
+MQTT_ATTRIBUTE_FIELDS = STATE_FIELD_NAMES - {"timestamp"}
 
 
 DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
@@ -87,6 +91,7 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         translation_key="empty_waste_bin_reminder_days",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda item: _empty_waste_bin_reminder_days(item["config"]),
+        supported_fn=has_waste_bin_reminder,
     ),
     UbpetSensorDescription(
         key="box_use_times",
@@ -251,8 +256,10 @@ CAT_SENSORS: tuple[UbpetSensorDescription, ...] = (
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator: UbpetDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[SensorEntity] = []
-    for serial in coordinator.data.get("devices", {}):
+    for serial, item in coordinator.data.get("devices", {}).items():
         for description in DEVICE_SENSORS:
+            if description.supported_fn is not None and not description.supported_fn(item):
+                continue
             sensor_class = UbpetLastUsedBySensor if description.key == "last_used_by" else UbpetDeviceSensor
             entities.append(sensor_class(coordinator, entry.entry_id, serial, description))
     async_add_entities(entities)

@@ -165,6 +165,27 @@
       },
       "camera_switch": {
         "name": "Камеру увімкнено"
+      },
+      "cover_open": {
+        "name": "Кришка відкрита"
+      },
+      "part_not_in_place": {
+        "name": "Деталь не на місці"
+      },
+      "motor_stuck": {
+        "name": "Двигун застряг"
+      },
+      "scale_fault": {
+        "name": "Несправність ваг"
+      },
+      "camera_fault": {
+        "name": "Несправність камери"
+      },
+      "light": {
+        "name": "Підсвічування"
+      },
+      "firmware_updating": {
+        "name": "Оновлення прошивки"
       }
     },
     "number": {

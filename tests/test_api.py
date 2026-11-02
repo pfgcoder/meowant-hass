@@ -735,6 +735,7 @@ class ApiUnitTests(unittest.TestCase):
         client.get_box_use_times = lambda serial: {"boxUseTimes": 10}
         client.get_deodorant_status = lambda serial: (_ for _ in ()).throw(api.UbpetApiError(500, {"code": 1}))
         client.get_device_online = lambda serial: {"online": True}
+        client.get_capabilities = lambda serial: {"capabilities": []}
         client.get_box_records = lambda serial, message_type, size=1: []
         client.get_cats = lambda: [{"catInfoId": 5, "nickname": "Cat"}]
 
@@ -878,7 +879,7 @@ class ApiUnitTests(unittest.TestCase):
         client = self.make_client()
         client.auth = api.UbpetAuth(token="token", refresh_token=None, expires_at_ms=9999999999999, user_id=1)
         client.get_devices = lambda: [{"serialNumber": "SN123"}]
-        for name in ("get_all_config", "get_box_use_times", "get_deodorant_status", "get_device_online"):
+        for name in ("get_all_config", "get_box_use_times", "get_deodorant_status", "get_device_online", "get_capabilities"):
             setattr(client, name, lambda serial: {})
         client.get_cats = lambda: []
 
@@ -892,6 +893,23 @@ class ApiUnitTests(unittest.TestCase):
 
         self.assertEqual(device["cat_records"], [])
         self.assertIsNone(device["device_records"])
+
+    def test_capabilities_are_fetched_until_one_call_works_then_kept(self):
+        client = self.make_client()
+        replies = [{"code": 0, "data": None}, {"code": 0, "data": {"capabilities": [{"code": "cat_face_upload"}]}}]
+        paths = []
+
+        def request(method, path, *, payload=None, auth):
+            paths.append(path)
+            return replies.pop(0)
+
+        client._request = request
+
+        with self.assertRaises(api.UbpetApiError):
+            client.get_capabilities("SN 1")
+        self.assertEqual(client.get_capabilities("SN 1"), {"capabilities": [{"code": "cat_face_upload"}]})
+        self.assertEqual(client.get_capabilities("SN 1"), {"capabilities": [{"code": "cat_face_upload"}]})
+        self.assertEqual(paths, ["/catbox-server/box/config/device/capabilities?sn=SN%201"] * 2)
 
     def test_auto_clean_delay_keeps_the_switch_as_it_is(self):
         client = self.make_client()
