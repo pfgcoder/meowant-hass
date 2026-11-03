@@ -37,7 +37,7 @@ def load_init_module():
             EVENT_HOMEASSISTANT_STOP="homeassistant_stop",
             Platform=types.SimpleNamespace(
                 SENSOR="sensor", BINARY_SENSOR="binary_sensor", NUMBER="number", SWITCH="switch",
-                TIME="time", SELECT="select", BUTTON="button",
+                TIME="time", DATETIME="datetime", SELECT="select", BUTTON="button",
             ),
         ),
         "homeassistant.core": _module("homeassistant.core", HomeAssistant=object, callback=lambda func: func),

@@ -17,6 +17,7 @@ class _Platform:
     NUMBER = "number"
     SWITCH = "switch"
     TIME = "time"
+    DATETIME = "datetime"
     SELECT = "select"
     BUTTON = "button"
 

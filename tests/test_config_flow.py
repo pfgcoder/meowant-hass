@@ -67,7 +67,7 @@ def _module(name: str, **attrs) -> types.ModuleType:
 def load_config_flow():
     """Load config_flow.py against stand-ins for Home Assistant and voluptuous, removed once loaded."""
     selector = _Selector("homeassistant.helpers.selector")
-    platform = Enum("Platform", {name: name.lower() for name in ("BINARY_SENSOR", "BUTTON", "NUMBER", "SELECT", "SENSOR", "SWITCH", "TIME")})
+    platform = Enum("Platform", {name: name.lower() for name in ("BINARY_SENSOR", "BUTTON", "DATETIME", "NUMBER", "SELECT", "SENSOR", "SWITCH", "TIME")})
     stubs = {
         "voluptuous": _module("voluptuous", Schema=lambda fields: fields, Required=lambda key, default=None: key),
         "homeassistant": _module(

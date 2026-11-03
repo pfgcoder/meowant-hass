@@ -14,6 +14,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import UbpetApiError, UbpetAuthError, UbpetClient
+from .bin_count import cleans_after, recount
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, EVENT_BOX, EVENT_VISIT
 from .mqtt import STATE_FIELD_NAMES
 from .visits import new_visits, visit_event_data
@@ -74,6 +75,10 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # replays visits.
         self._record_store: Store[dict[str, int]] = Store(hass, 1, f"{DOMAIN}.{config_entry.entry_id}.visits")
         self._record_cursor: dict[str, int] | None = None
+        # Per box, when the waste bin was emptied (epoch ms) and the auto cleans since then, or None
+        # while they can't be counted. Stored, so a restart keeps the count.
+        self._bin_store: Store[dict[str, dict[str, Any]]] = Store(hass, 1, f"{DOMAIN}.{config_entry.entry_id}.waste_bin")
+        self._bin: dict[str, dict[str, Any]] | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         if self.push is not None and self.push.yielding and self.data is not None:
@@ -115,7 +120,8 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Fire an event for each record newer than the stored cursor (bojanrajkovic c7feb81, cc6b96b)."""
         if self._record_cursor is None:
             self._record_cursor = await self._record_store.async_load() or {}
-        changed = False
+        await self._async_load_bin()
+        changed = bin_changed = False
         for serial, item in devices.items():
             if not isinstance(item, dict):
                 continue
@@ -131,8 +137,57 @@ class UbpetDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     changed = True
                 if batch.visits:
                     _LOGGER.info("UPET reported %s new %s for %s", len(batch.visits), records_key, serial)
+                if records_key == "device_records" and self._count_bin_cleans(serial, item.get(records_key), batch.visits):
+                    bin_changed = True
         if changed:
             await self._record_store.async_save(self._record_cursor)
+        if bin_changed:
+            await self._bin_store.async_save(self._bin)
+
+    async def _async_load_bin(self) -> None:
+        if self._bin is None:
+            self._bin = await self._bin_store.async_load() or {}
+
+    def _count_bin_cleans(self, serial: str, records: list[dict[str, Any]] | None, new_records: list[dict[str, Any]]) -> bool:
+        """Bring the box's cleans since the bin was emptied up to date; True if the count changed.
+
+        The record cursor hands over each record once, so new cleans are added as they come and a
+        week of them never needs more records than one fetch holds. A count that couldn't be made
+        yet (the records hadn't loaded) is tried again from the whole fetch instead.
+        """
+        bin_entry = (self._bin or {}).get(serial)
+        if bin_entry is None:
+            return False
+        if bin_entry.get("cleans") is None:
+            cleans = recount(records, bin_entry["emptied_at"], self.client.records_per_fetch)
+        else:
+            cleans = bin_entry["cleans"] + cleans_after(new_records, bin_entry["emptied_at"])
+        if cleans == bin_entry.get("cleans"):
+            return False
+        bin_entry["cleans"] = cleans
+        return True
+
+    async def async_set_bin_emptied(self, serial: str, when: datetime) -> None:
+        """Count the box's cleans from `when`: Reset waste bin's press, or a time set by hand.
+
+        Counted from scratch in the records already fetched, which the record cursor has passed,
+        so the cleans that come after are added once each by the next updates.
+        """
+        await self._async_load_bin()
+        emptied_at = int(when.timestamp() * 1000)
+        item = ((self.data or {}).get("devices") or {}).get(serial) or {}
+        cleans = recount(item.get("device_records"), emptied_at, self.client.records_per_fetch)
+        self._bin[serial] = {"emptied_at": emptied_at, "cleans": cleans}
+        await self._bin_store.async_save(self._bin)
+        _LOGGER.info("UPET waste bin for %s emptied at %s; %s cleans since", serial, when.isoformat(), cleans)
+        self.async_update_listeners()
+
+    def bin_emptied_at(self, serial: str) -> datetime | None:
+        bin_entry = (self._bin or {}).get(serial)
+        return None if bin_entry is None else datetime.fromtimestamp(bin_entry["emptied_at"] / 1000, UTC)
+
+    def cleans_since_bin_emptied(self, serial: str) -> int | None:
+        return ((self._bin or {}).get(serial) or {}).get("cleans")
 
     def _logbook_links(self, serial: str, cat_id: Any) -> dict[str, str]:
         """Link a record to the cat's device and the box's Last used by sensor.

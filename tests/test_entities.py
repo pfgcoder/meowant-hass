@@ -8,7 +8,7 @@ import unittest
 
 
 COMPONENT_PATH = Path(__file__).resolve().parents[1] / "custom_components" / "ubpet"
-PLATFORM_FILES = ("binary_sensor", "button", "number", "select", "sensor", "switch", "time")
+PLATFORM_FILES = ("binary_sensor", "button", "datetime", "number", "select", "sensor", "switch", "time")
 
 
 def _entity_classes():

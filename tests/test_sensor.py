@@ -63,7 +63,7 @@ def load_sensor_module():
             SensorDeviceClass=names(TIMESTAMP="timestamp", WEIGHT="weight", DURATION="duration"),
             SensorEntity=object,
             SensorEntityDescription=_EntityDescription,
-            SensorStateClass=names(TOTAL="total", MEASUREMENT="measurement"),
+            SensorStateClass=names(TOTAL="total", TOTAL_INCREASING="total_increasing", MEASUREMENT="measurement"),
         ),
         "homeassistant.config_entries": _module("homeassistant.config_entries", ConfigEntry=object),
         "homeassistant.const": _module(
@@ -278,6 +278,17 @@ class TodayCountTests(unittest.TestCase):
         self.assertTrue(sensor._is_cats_record(_visit("Tiny", MIDNIGHT), tiny))
         # A cat without a nickname matches nothing rather than every unnamed record.
         self.assertFalse(sensor._is_cats_record(_visit(None, MIDNIGHT), {"catInfoId": None, "nickname": None}))
+
+
+class CleansSinceBinEmptiedTests(unittest.TestCase):
+    def test_shows_the_count_the_coordinator_keeps(self):
+        entity = _device_sensor("cleans_since_bin_emptied", {})
+        entity.coordinator.cleans_since_bin_emptied = lambda serial: {"SN1": 12}.get(serial)
+
+        self.assertEqual(entity.native_value, 12)
+        # Not a daily count: it goes back to 0 only when the bin is emptied.
+        self.assertIsNone(entity.last_reset)
+        self.assertEqual(entity.entity_description.state_class, "total_increasing")
 
 
 class WasteBinReminderTests(unittest.TestCase):

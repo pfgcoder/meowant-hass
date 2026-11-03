@@ -303,6 +303,144 @@ class RecordEventTests(unittest.TestCase):
         self.assertNotIn("SN1", STORED.get("ubpet.entry.visits", {}))
 
 
+EMPTIED_MS = 1793600000000
+EMPTIED = datetime.fromtimestamp(EMPTIED_MS / 1000, UTC)
+
+
+def _clean(record_id: int, after_s: int, event_type: int = 31) -> dict:
+    """A device record `after_s` seconds after the bin was emptied (negative for before)."""
+    return {"recordId": record_id, "eventTime": EMPTIED_MS + after_s * 1000, "eventType": event_type}
+
+
+class WasteBinCountTests(unittest.TestCase):
+    """Cleans since bin emptied: counted by the integration, since the box's own counter stays at 0."""
+
+    def setUp(self):
+        import asyncio
+
+        self.asyncio = asyncio
+        STORED.clear()
+        self.module = load_coordinator_module()
+        self.hass = types.SimpleNamespace(bus=types.SimpleNamespace(async_fire=lambda event, data: None))
+
+    def coordinator(self, page_size: int = 50):
+        coordinator = self.module.UbpetDataUpdateCoordinator(self.hass, _entry(), types.SimpleNamespace(records_per_fetch=page_size))
+        coordinator.data = {"devices": {}}
+        return coordinator
+
+    def update(self, coordinator, records, serial: str = "SN1") -> None:
+        """One update with these device records, newest first, as get_dashboard returns them."""
+        box = _loaded_box(device_records=records)
+        self.asyncio.run(coordinator._fire_new_records({serial: box}))
+        coordinator.data["devices"][serial] = box
+
+    def empty(self, coordinator, when=EMPTIED, serial: str = "SN1") -> None:
+        self.asyncio.run(coordinator.async_set_bin_emptied(serial, when))
+
+    def test_unknown_until_the_bin_is_first_marked_emptied(self):
+        coordinator = self.coordinator()
+        self.update(coordinator, [_clean(2, 60), _clean(1, -60)])
+
+        self.assertIsNone(coordinator.cleans_since_bin_emptied("SN1"))
+        self.assertIsNone(coordinator.bin_emptied_at("SN1"))
+
+    def test_marking_it_emptied_after_the_fact_counts_the_cleans_already_fetched(self):
+        # The forgotten press: set to last night's time, the records already show the cleans since.
+        coordinator = self.coordinator()
+        self.update(coordinator, [_clean(4, 300), _clean(3, 200, event_type=12), _clean(2, 100), _clean(1, -100)])
+
+        self.empty(coordinator)
+
+        self.assertEqual(coordinator.cleans_since_bin_emptied("SN1"), 2)
+        self.assertEqual(coordinator.bin_emptied_at("SN1"), EMPTIED)
+        self.assertEqual(STORED["ubpet.entry.waste_bin"], {"SN1": {"emptied_at": EMPTIED_MS, "cleans": 2}})
+
+    def test_each_new_clean_adds_one_once(self):
+        coordinator = self.coordinator()
+        self.update(coordinator, [_clean(1, -100)])
+        self.empty(coordinator)
+
+        self.update(coordinator, [_clean(3, 200), _clean(2, 100, event_type=12), _clean(1, -100)])
+        self.update(coordinator, [_clean(3, 200), _clean(2, 100, event_type=12), _clean(1, -100)])
+
+        self.assertEqual(coordinator.cleans_since_bin_emptied("SN1"), 1)
+
+    def test_a_clean_uploaded_late_counts_by_when_it_happened(self):
+        # After an outage the box uploads what it stored: a clean from before the empty doesn't count.
+        coordinator = self.coordinator()
+        self.update(coordinator, [_clean(1, -100)])
+        self.empty(coordinator)
+
+        self.update(coordinator, [_clean(3, 50), _clean(2, -50), _clean(1, -100)])
+
+        self.assertEqual(coordinator.cleans_since_bin_emptied("SN1"), 1)
+
+    def test_more_cleans_than_one_fetch_holds_are_all_counted(self):
+        coordinator = self.coordinator(page_size=3)
+        self.update(coordinator, [_clean(1, -100)])
+        self.empty(coordinator)
+
+        records = {1: _clean(1, -100), **{record_id: _clean(record_id, record_id * 10) for record_id in range(2, 9)}}
+        for newest in range(2, 9):
+            # Each update fetches only the newest three.
+            self.update(coordinator, [records[record_id] for record_id in range(newest, 0, -1)][:3])
+
+        self.assertEqual(coordinator.cleans_since_bin_emptied("SN1"), 7)
+
+    def test_a_restart_keeps_the_count_without_counting_twice(self):
+        coordinator = self.coordinator()
+        self.update(coordinator, [_clean(2, 100), _clean(1, -100)])
+        self.empty(coordinator)
+
+        restarted = self.coordinator()
+        self.update(restarted, [_clean(3, 200), _clean(2, 100), _clean(1, -100)])
+
+        self.assertEqual(restarted.cleans_since_bin_emptied("SN1"), 2)
+        self.assertEqual(restarted.bin_emptied_at("SN1"), EMPTIED)
+
+    def test_a_time_older_than_the_fetched_records_is_unknown(self):
+        coordinator = self.coordinator(page_size=2)
+        self.update(coordinator, [_clean(2, 200), _clean(1, 100)])
+
+        self.empty(coordinator)
+        self.update(coordinator, [_clean(3, 300), _clean(2, 200)])
+
+        self.assertIsNone(coordinator.cleans_since_bin_emptied("SN1"))
+
+    def test_records_that_had_not_loaded_are_counted_at_the_next_update(self):
+        coordinator = self.coordinator()
+        self.update(coordinator, [_clean(1, -100)])
+        coordinator.data["devices"]["SN1"]["device_records"] = []
+        self.empty(coordinator)
+        self.assertIsNone(coordinator.cleans_since_bin_emptied("SN1"))
+
+        self.update(coordinator, [_clean(2, 100), _clean(1, -100)])
+
+        self.assertEqual(coordinator.cleans_since_bin_emptied("SN1"), 1)
+
+    def test_a_new_time_counts_again_from_it(self):
+        coordinator = self.coordinator()
+        self.update(coordinator, [_clean(3, 300), _clean(2, 100), _clean(1, -100)])
+        self.empty(coordinator)
+        self.assertEqual(coordinator.cleans_since_bin_emptied("SN1"), 2)
+
+        self.empty(coordinator, EMPTIED + timedelta(seconds=200))
+
+        self.assertEqual(coordinator.cleans_since_bin_emptied("SN1"), 1)
+
+    def test_each_box_counts_on_its_own(self):
+        coordinator = self.coordinator()
+        self.update(coordinator, [_clean(1, -100)], serial="SN1")
+        self.update(coordinator, [_clean(11, -100)], serial="SN2")
+        self.empty(coordinator, serial="SN1")
+
+        self.update(coordinator, [_clean(2, 100), _clean(1, -100)], serial="SN1")
+        self.update(coordinator, [_clean(12, 100), _clean(11, -100)], serial="SN2")
+
+        self.assertEqual(coordinator.cleans_since_bin_emptied("SN1"), 1)
+        self.assertIsNone(coordinator.cleans_since_bin_emptied("SN2"))
+
+
 class GuessedStateTests(unittest.TestCase):
     def setUp(self):
         coordinator_module = load_coordinator_module()

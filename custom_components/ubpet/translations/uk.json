@@ -98,6 +98,9 @@
       "cleans_today": {
         "name": "Очищення сьогодні"
       },
+      "cleans_since_bin_emptied": {
+        "name": "Очищень після спорожнення контейнера"
+      },
       "box_use_times": {
         "name": "Кількість використань"
       },
@@ -240,6 +243,11 @@
       },
       "empty_waste_bin_reminder_time": {
         "name": "Час нагадування спорожнити контейнер"
+      }
+    },
+    "datetime": {
+      "waste_bin_emptied": {
+        "name": "Контейнер спорожнено"
       }
     },
     "select": {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import logging
 from typing import Any
 
@@ -203,7 +204,17 @@ class UbpetMqttCommandButton(CoordinatorEntity[UbpetDataUpdateCoordinator], Butt
             await self.coordinator.async_request_refresh()
             return
         if self.entity_description.service_id == RESET_WASTE_BIN_SERVICE:
-            await async_write_setting(self.hass, self.entity_description.name, self.coordinator.client.reset_box_use_times, self._serial)
+            # Our own count first: the box's counter isn't fed on the SC03, and the vendor may refuse
+            # the reset on a shared account, but the press still means the bin was emptied.
+            await self.coordinator.async_set_bin_emptied(self._serial, datetime.now(UTC))
+            try:
+                await async_write_setting(
+                    self.hass, self.entity_description.name, self.coordinator.client.reset_box_use_times, self._serial
+                )
+            except Exception as err:
+                raise HomeAssistantError(
+                    f"Cleans since bin emptied now counts from this press, but the box's own waste-bin counter wasn't reset: {err}"
+                ) from err
             _LOGGER.info("Reset UPET waste-bin counter for serial=%s", self._serial)
             await self.coordinator.async_request_refresh()
             return

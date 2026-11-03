@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 import importlib.util
 from pathlib import Path
 import sys
@@ -56,7 +57,7 @@ def _module(name: str, **attrs) -> types.ModuleType:
 
 
 def load_platforms():
-    """Load switch.py, number.py and button.py against stand-ins for Home Assistant, removed once loaded."""
+    """Load switch.py, number.py, button.py and datetime.py against stand-ins for Home Assistant, removed once loaded."""
     names = types.SimpleNamespace
     stubs = {
         "homeassistant": _module("homeassistant"),
@@ -73,6 +74,9 @@ def load_platforms():
         "homeassistant.components.button": _module(
             "homeassistant.components.button", ButtonEntity=object, ButtonEntityDescription=_EntityDescription
         ),
+        "homeassistant.components.datetime": _module(
+            "homeassistant.components.datetime", DateTimeEntity=object, DateTimeEntityDescription=_EntityDescription
+        ),
         "homeassistant.config_entries": _module("homeassistant.config_entries", ConfigEntry=object),
         "homeassistant.const": _module("homeassistant.const", UnitOfTime=names(MINUTES="min")),
         "homeassistant.core": _module("homeassistant.core", HomeAssistant=object, callback=lambda func: func),
@@ -87,13 +91,14 @@ def load_platforms():
         "homeassistant.helpers.update_coordinator": _module(
             "homeassistant.helpers.update_coordinator", CoordinatorEntity=_CoordinatorEntity
         ),
+        "homeassistant.util": _module("homeassistant.util", dt=names(utcnow=lambda: datetime.now(UTC))),
         PACKAGE_NAME: _module(PACKAGE_NAME, __path__=[str(COMPONENT_PATH)]),
         f"{PACKAGE_NAME}.const": _module(f"{PACKAGE_NAME}.const", DOMAIN="ubpet"),
         f"{PACKAGE_NAME}.coordinator": _module(f"{PACKAGE_NAME}.coordinator", UbpetDataUpdateCoordinator=object),
     }
     platforms = {}
     with patch.dict(sys.modules, stubs):
-        for name in ("switch", "number", "button"):
+        for name in ("switch", "number", "button", "datetime"):
             spec = importlib.util.spec_from_file_location(f"{PACKAGE_NAME}.{name}", COMPONENT_PATH / f"{name}.py")
             module = importlib.util.module_from_spec(spec)
             assert spec.loader is not None
@@ -102,10 +107,10 @@ def load_platforms():
             platforms[name] = module
         # The real api.py, loaded through writes.py, for its error classes.
         platforms["api"] = sys.modules[f"{PACKAGE_NAME}.api"]
-    return platforms["switch"], platforms["number"], platforms["button"], platforms["api"]
+    return platforms["switch"], platforms["number"], platforms["button"], platforms["datetime"], platforms["api"]
 
 
-switch, number, button, api = load_platforms()
+switch, number, button, datetime_platform, api = load_platforms()
 
 
 class FakeClient:
@@ -198,6 +203,8 @@ class FakeCoordinator:
         self.listener_updates = 0
         self.guesses: list[dict] = []
         self.restored: list[dict] = []
+        # Each time the waste bin was marked emptied: (serial, when).
+        self.bin_emptied: list[tuple[str, datetime]] = []
 
     def set_mqtt_work_state(self, serial, state):
         self.guesses.append(state)
@@ -211,6 +218,12 @@ class FakeCoordinator:
 
     def async_update_listeners(self):
         self.listener_updates += 1
+
+    async def async_set_bin_emptied(self, serial, when):
+        self.bin_emptied.append((serial, when))
+
+    def bin_emptied_at(self, serial):
+        return next((when for marked, when in reversed(self.bin_emptied) if marked == serial), None)
 
 
 class FakeHass:
@@ -451,6 +464,65 @@ class ResetDeodorantButtonTests(unittest.TestCase):
 
         self.assertEqual(entity.coordinator.client.calls, [("reset_deodorant", "SN1")])
         self.assertEqual(entity.coordinator.refreshes, 1)
+
+
+class WasteBinEmptiedTests(unittest.TestCase):
+    """Reset waste bin and Waste bin emptied, which Cleans since bin emptied counts from."""
+
+    def test_reset_waste_bin_marks_the_bin_emptied_and_resets_the_box_counter(self):
+        entity = _button({}, button.RESET_WASTE_BIN_SERVICE)
+
+        asyncio.run(entity.async_press())
+
+        [(serial, when)] = entity.coordinator.bin_emptied
+        self.assertEqual(serial, "SN1")
+        self.assertLess(abs(datetime.now(UTC) - when), timedelta(seconds=5))
+        self.assertEqual(entity.coordinator.client.calls, [("reset_box_use_times", "SN1")])
+        self.assertEqual(entity.coordinator.refreshes, 1)
+
+    def test_a_refused_box_reset_still_marks_the_bin_emptied(self):
+        # The SC03 never feeds its own counter, and a shared account may not be allowed to reset it.
+        entity = _button({}, button.RESET_WASTE_BIN_SERVICE)
+        entity.coordinator.client = RefusingClient(_permission_error())
+
+        with self.assertRaises(HomeAssistantError) as caught:
+            asyncio.run(entity.async_press())
+
+        self.assertEqual(len(entity.coordinator.bin_emptied), 1)
+        self.assertIn("Cleans since bin emptied now counts from this press", str(caught.exception))
+        self.assertIn('"Reset waste bin"', str(caught.exception))
+        self.assertEqual(entity.coordinator.refreshes, 0)
+
+    def _emptied(self):
+        coordinator = FakeCoordinator({})
+        return datetime_platform.UbpetWasteBinEmptied(coordinator, "entry", "SN1")
+
+    def test_a_forgotten_press_is_made_up_by_setting_the_time(self):
+        entity = self._emptied()
+        self.assertIsNone(entity.native_value)
+        last_night = datetime.now(UTC) - timedelta(hours=8)
+
+        asyncio.run(entity.async_set_value(last_night))
+
+        self.assertEqual(entity.coordinator.bin_emptied, [("SN1", last_night)])
+        self.assertEqual(entity.native_value, last_night)
+
+    def test_a_time_in_the_future_is_refused(self):
+        entity = self._emptied()
+
+        with self.assertRaises(HomeAssistantError):
+            asyncio.run(entity.async_set_value(datetime.now(UTC) + timedelta(hours=1)))
+
+        self.assertEqual(entity.coordinator.bin_emptied, [])
+
+    def test_every_box_gets_one(self):
+        coordinator = FakeCoordinator({})
+        coordinator.data["devices"]["SN2"] = {}
+        added: list[Any] = []
+
+        asyncio.run(datetime_platform.async_setup_entry(FakeHass(coordinator), types.SimpleNamespace(entry_id="entry"), added.extend))
+
+        self.assertEqual([entity._attr_unique_id for entity in added], ["entry_SN1_waste_bin_emptied", "entry_SN2_waste_bin_emptied"])
 
 
 if __name__ == "__main__":

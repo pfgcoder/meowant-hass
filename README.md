@@ -18,7 +18,7 @@ For safer use, create a separate UPET/Airrobo account and share litter box acces
 - Selectable account provider so credentials are routed to the correct vendor tenant.
 - Device discovery from the vendor cloud account.
 - Read-only box, waste-bin, deodorant, online, and firmware data.
-- Visit and clean history: last visit, the cat that last used the box, and today's visits (per box and per cat) and cleans.
+- Visit and clean history: last visit, the cat that last used the box, today's visits (per box and per cat) and cleans, and cleans since the waste bin was emptied.
 - Cat profile sensors and cat picture URL attributes when returned by the API.
 - Config controls for confirmed settings:
   - Auto clean delay.
@@ -134,6 +134,7 @@ Device sensors:
 - Last visit (time of the newest visit record, with the five most recent as attributes).
 - Last used by (the cat on the newest visit matched to a cat; weights the box couldn't match are skipped; kept over a restart).
 - Visits today and Cleans today (restart at local midnight).
+- Cleans since bin emptied (see [Waste Bin](#waste-bin)).
 - Empty waste-bin reminder days.
 - Box use times.
 - Waste-bin level.
@@ -189,12 +190,13 @@ Device controls:
 - Empty waste-bin reminder weekday select.
 - Do not disturb switch and start/end times.
 - Light schedule switch and start/end times.
+- Waste bin emptied date and time (see [Waste Bin](#waste-bin)).
 
 Device buttons:
 
 - REST request.
 - MQTT request state.
-- Reset waste-bin counter.
+- Reset waste bin: marks the bin emptied now and resets the box's own counter.
 - Reset deodorant (after replacing the deodorant block).
 - Start clean.
 - Pause clean.
@@ -215,6 +217,29 @@ Cat sensors:
 
 Cat picture URLs are exposed as cat entity attributes when returned by the vendor API. They
 are left out of the recorder's history.
+
+## Waste Bin
+
+On the SC03 the box's own waste-bin counter stays at 0 (Box use times and Waste-bin level
+never move), so the integration keeps a count of its own. **Cleans since bin
+emptied** counts the box's finished auto cleans ("Auto cleaned" in the app, the same records
+Cleans today counts) after **Waste bin emptied**. Every clean rakes waste into the bin, so the
+count shows how full it's getting.
+
+- **Reset waste bin** sets Waste bin emptied to now and starts the count again at 0. It then
+  asks the vendor to reset the box's own counter too. If the vendor refuses (a shared account
+  may not be allowed to), the count still starts again and the error says so.
+- **Forgot to press it?** Set Waste bin emptied to when you emptied the bin. The count is
+  worked out again from the records already fetched (`Records per fetch`, which covers a few
+  days of cleans). If the time is older than those records, the count shows unknown rather
+  than a number that's too low.
+- After that, each new clean adds one as its record arrives, so a week of cleans never needs
+  more records than one fetch holds. A clean the box uploads late after an outage counts by
+  when it happened.
+- The count and the time are stored, so restarts keep them. Both are unknown until the bin is
+  first marked emptied.
+- Cleans started from the app or Home Assistant leave no "Auto cleaned" record, so they aren't
+  counted.
 
 ## Visit Log
 

@@ -98,6 +98,9 @@
       "cleans_today": {
         "name": "Cleans today"
       },
+      "cleans_since_bin_emptied": {
+        "name": "Cleans since bin emptied"
+      },
       "box_use_times": {
         "name": "Box use times"
       },
@@ -240,6 +243,11 @@
       },
       "empty_waste_bin_reminder_time": {
         "name": "Empty waste bin reminder time"
+      }
+    },
+    "datetime": {
+      "waste_bin_emptied": {
+        "name": "Waste bin emptied"
       }
     },
     "select": {

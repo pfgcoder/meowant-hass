@@ -15,6 +15,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .bin_count import AUTO_CLEANED_EVENT
 from .box_config import empty_waste_bin_reminder_config, has_waste_bin_reminder
 from .const import DOMAIN
 from .coordinator import UbpetDataUpdateCoordinator
@@ -29,9 +30,8 @@ class UbpetSensorDescription(SensorEntityDescription):
 
 
 # Record eventTypes. Cat records: 3 is a visit matched to a cat (21 is a weight the box couldn't
-# match). Device records: 31 is a finished auto clean, listed as "Auto cleaned" in the app.
+# match). Device records: AUTO_CLEANED_EVENT (31) is a finished auto clean.
 VISIT_EVENT = 3
-AUTO_CLEANED_EVENT = 31
 
 # Daily counts. They're totals that restart at local midnight (last_reset), so a dip during the
 # day, such as a record falling out of the fetched window, isn't read as a new meter cycle.
@@ -83,6 +83,16 @@ DEVICE_SENSORS: tuple[UbpetSensorDescription, ...] = (
         translation_key="cleans_today",
         state_class=SensorStateClass.TOTAL,
         value_fn=lambda item: _count_today(_device_records(item), AUTO_CLEANED_EVENT),
+    ),
+    UbpetSensorDescription(
+        key="cleans_since_bin_emptied",
+        name="Cleans since bin emptied",
+        icon="mdi:delete-clock",
+        translation_key="cleans_since_bin_emptied",
+        # Drops to 0 when the bin is emptied, which a total_increasing count reads as a new cycle.
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        # The integration keeps this count, so UbpetDeviceSensor.native_value reads it from the coordinator.
+        value_fn=lambda item: None,
     ),
     UbpetSensorDescription(
         key="empty_waste_bin_reminder_days",
@@ -312,6 +322,8 @@ class UbpetDeviceSensor(CoordinatorEntity[UbpetDataUpdateCoordinator], SensorEnt
             return self.coordinator.last_rest_update_at
         if self.entity_description.key == "last_mqtt_update":
             return self.coordinator.last_mqtt_update_at(self._serial)
+        if self.entity_description.key == "cleans_since_bin_emptied":
+            return self.coordinator.cleans_since_bin_emptied(self._serial)
         item = self.coordinator.data.get("devices", {}).get(self._serial)
         if not item:
             return None
